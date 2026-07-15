@@ -1,2 +1,56 @@
-/downloads
-/__pycache__
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+.tox/
+.nox/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~       # emacs/vim backup
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Backups and one-offs (avoid committing scratch files)
+*.bak
+*.orig
+*.rej
+*~
+
+# Project-specific
+# jar downloads directory is transient — downloads don't go in source control
+downloads/
+# Forge installers are tens of MB, don't bloat the repo
+*.jar
+# atomic-rename temp files used during streaming downloads
+*.part
+
+# Hermes planning files stay local (these are conversation artifacts, not source)
+.hermes/

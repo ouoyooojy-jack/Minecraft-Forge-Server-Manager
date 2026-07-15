@@ -1,6 +1,7 @@
 import flet as ft
 import downloader
-import forge_api
+from services import forge_api
+
 
 def main(page: ft.Page):
     page.title = "Mc server manager"
@@ -8,7 +9,7 @@ def main(page: ft.Page):
     page.window_height = 400
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
-    
+
     raw_versions = forge_api.get_versions()
     version_map = forge_api.group_by_mc_major(raw_versions)
 

@@ -7,6 +7,7 @@
 - [forge_api.md](forge_api.md) — `services/forge_api.py` 的設計決定
 - [configuration.md](configuration.md) — `config.py` 的選擇理由 + 常數說明
 - [exceptions.md](exceptions.md) — 例外階層的設計
+- [download_service.md](download_service.md) — `services/download_service.py` 的設計(三層防護、節流、原生取消)
 
 ## 整體架構(30 秒看懂)
 

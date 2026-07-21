@@ -58,21 +58,20 @@ def test_build_app_returns_row():
 
 
 # ─── 2. Sidebar exposes the design-spec destinations ──────────
-def test_sidebar_has_5_nav_destinations():
+def test_sidebar_has_only_the_three_application_destinations():
     from ui.sidebar import Sidebar
     sb = Sidebar(MagicMock())
-    assert len(sb._dests) == 8, f"expected 8 destinations, got {len(sb._dests)}"
-    assert len(NAV_DESTS) == 5
-    assert len(FOOTER_DESTS) == 3
-    print(f"[2] sidebar has 8 destinations (5 nav + 3 footer)  OK")
+    assert len(sb._dests) == 3
+    assert len(NAV_DESTS) == 3
+    assert len(FOOTER_DESTS) == 0
 
 
 # ─── 3. Default state: collapsed, Dashboard selected ──────────
-def test_sidebar_default_collapsed_dashboard_selected():
+def test_sidebar_default_collapsed_home_selected():
     from ui.sidebar import Sidebar
     sb = Sidebar(MagicMock())
     assert sb.expanded is False, "sidebar should start collapsed"
-    assert sb.selected == 1, f"default selected should be 1 (Dashboard), got {sb.selected}"
+    assert sb.selected == 0
     print(f"[3] default: collapsed, Dashboard selected  OK")
 
 
@@ -96,8 +95,7 @@ def test_sidebar_expanded_shows_all_labels():
         c.value for c in _walk(sb._outer)
         if isinstance(c, ft.Text) and c.value
     ]
-    expected = {"Home", "Dashboard", "Projects", "Tasks", "Reporting",
-                "Notifications", "Support", "Settings"}
+    expected = {"主頁", "下載", "設定"}
     missing = expected - set(texts)
     assert not missing, f"missing labels: {missing}"
     print(f"[5] expanded: all 8 labels visible  OK")
@@ -121,6 +119,14 @@ def test_sidebar_collapsed_no_labels():
 
 
 # ─── 7. Sidebar communicates selection via on_change ───────────
+def test_sidebar_collapsed_renders_subtle_menu_rail():
+    from ui.sidebar import Sidebar
+    sb = Sidebar(MagicMock())
+    buttons = [c for c in _walk(sb._outer) if isinstance(c, ft.IconButton)]
+    assert [button.icon for button in buttons] == [ft.Icons.MENU]
+    assert not [c for c in _walk(sb._outer) if isinstance(c, ft.Text)]
+
+
 def test_sidebar_fires_on_change():
     from ui.sidebar import Sidebar
     fired: list[int] = []

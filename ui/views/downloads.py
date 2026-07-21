@@ -40,37 +40,28 @@ logger = logging.getLogger(__name__)
 _cached_versions: list[str] | None = None
 
 
-def build_downloads_view(page: ft.Page) -> ft.Container:
+def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -> ft.Container:
     """Construct the downloads page."""
-    palette = get_palette(dark=False)  # initial palette only
-    apply_theme(page, dark=False)        # theme applied at app level
+    palette = palette or get_palette(dark=False)
 
     download_service = DownloadService()
     cancel_event = threading.Event()
     throttle = ProgressThrottle(hz=30)
 
-    global _cached_versions
-    if _cached_versions is None:
-        try:
-            _cached_versions = get_versions()
-        except NetworkError as exc:
-            logger.warning("Initial fetch failed: %s", exc)
-            _cached_versions = []
-    versions = _cached_versions
-
-    grouped = group_by_mc_major(versions)
-
     def major_key(m: str):
         return tuple(int(x) for x in m.split("."))
 
-    sorted_majors = sorted(grouped.keys(), key=major_key, reverse=True)
-
-    status_text = make_status_text(palette)
+    # The view must render before contacting Forge Maven.  ``requests`` is
+    # synchronous, so performing it while constructing this view freezes the
+    # Flet UI thread for as long as the HTTP timeout.
+    grouped: dict[str, list[str]] = {}
+    status_text = make_status_text(palette, text="正在載入 Forge 版本…")
 
     major_dropdown = make_dropdown(
         "Major version",
         palette,
-        options=[ft.dropdown.Option(text=m) for m in sorted_majors],
+        options=[],
+        disabled=True,
     )
     sub_dropdown = make_dropdown("Forge version", palette, disabled=True)
 
@@ -107,6 +98,31 @@ def build_downloads_view(page: ft.Page) -> ft.Container:
             sub_dropdown.options = []
             sub_dropdown.disabled = True
         refresh_button_state()
+        page.update()
+
+    def load_options(versions: list[str]) -> None:
+        grouped.clear()
+        grouped.update(group_by_mc_major(versions))
+        sorted_majors = sorted(grouped.keys(), key=major_key, reverse=True)
+        major_dropdown.options = [ft.dropdown.Option(text=m) for m in sorted_majors]
+        major_dropdown.disabled = not bool(sorted_majors)
+        status_text.value = (
+            "選擇 Minecraft 與 Forge 版本。"
+            if sorted_majors else "目前沒有可用的 Forge 版本。"
+        )
+
+    async def load_versions() -> None:
+        global _cached_versions
+        try:
+            versions = await asyncio.to_thread(get_versions)
+        except NetworkError as exc:
+            logger.warning("Initial fetch failed: %s", exc)
+            versions = []
+            status_text.value = "無法載入 Forge 版本，請稍後再試。"
+        else:
+            status_text.value = "選擇 Minecraft 與 Forge 版本。"
+        _cached_versions = versions
+        load_options(versions)
         page.update()
 
     def on_sub_select(e: ft.ControlEvent):
@@ -190,6 +206,12 @@ def build_downloads_view(page: ft.Page) -> ft.Container:
     sub_dropdown.on_select = on_sub_select
     download_button.on_click = on_download_click
     cancel_button.on_click = on_cancel_click
+
+    global _cached_versions
+    if _cached_versions is None:
+        page.run_task(load_versions)
+    else:
+        load_options(_cached_versions)
 
     return ft.Container(
         content=ft.Column(

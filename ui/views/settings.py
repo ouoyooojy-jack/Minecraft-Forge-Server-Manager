@@ -11,9 +11,9 @@ from ui.components import make_status_text, make_title
 from ui.theme import get_palette
 
 
-def build_settings_view() -> ft.Container:
+def build_settings_view(palette: dict[str, str] | None = None) -> ft.Container:
     """Return the settings page content."""
-    palette = get_palette(dark=False)
+    palette = palette or get_palette(dark=False)
 
     return ft.Container(
         content=ft.Column(

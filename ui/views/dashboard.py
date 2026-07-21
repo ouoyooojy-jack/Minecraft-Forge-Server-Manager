@@ -11,12 +11,12 @@ from ui.components import make_status_text, make_title
 from ui.theme import get_palette
 
 
-def build_dashboard_view() -> ft.Container:
+def build_dashboard_view(palette: dict[str, str] | None = None) -> ft.Container:
     """Return the dashboard content wrapped in a Container.
 
     Stateless — re-creating this view costs nothing.
     """
-    palette = get_palette(dark=False)  # initial palette only
+    palette = palette or get_palette(dark=False)
 
     return ft.Container(
         content=ft.Column(

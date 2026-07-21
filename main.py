@@ -2,16 +2,41 @@
 import logging
 import flet as ft
 from ui.app import build_app
+from ui.title_bar import build_title_bar
+from ui.theme import get_palette
 
 def main(page: ft.Page) -> None:
     page.title = "Mc Server Manager"
     page.window.width = 720
     page.window.height = 480
+    # The application owns the entire title bar, including window controls.
+    page.window.title_bar_hidden = True
+    page.window.title_bar_buttons_hidden = True
+    page.padding = 0
+    page.spacing = 0
     # Intentionally NOT setting page.horizontal_alignment: doing so
     # would centre the Row inside the page and stop the sidebar from
     # hugging the left edge. The Row uses MainAxisAlignment.START on
     # its own; we let it.
-    page.add(build_app(page))
+    theme_state = {"dark": True}
+
+    def rebuild(_event=None) -> None:
+        theme_state["dark"] = not theme_state["dark"] if _event else theme_state["dark"]
+        palette = get_palette(dark=theme_state["dark"])
+        page.controls.clear()
+        page.add(
+            ft.Column(
+                [
+                    build_title_bar(page, palette, on_theme_toggle=rebuild),
+                    build_app(page, dark=theme_state["dark"]),
+                ],
+                expand=True,
+                spacing=0,
+            )
+        )
+        page.update()
+
+    rebuild()
 
 
 if __name__ == "__main__":
@@ -41,8 +66,6 @@ if __name__ == "__main__":
                 self.snack_bar = None
                 self.padding = None
                 self.spacing = None
-                self.horizontal_alignment = None
-                self.vertical_alignment = None
                 self.window = None
 
             def add(self, c):

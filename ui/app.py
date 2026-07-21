@@ -14,67 +14,39 @@ from ui.views.downloads import build_downloads_view
 from ui.views.settings import build_settings_view
 
 
-# View-index map: keep app shell aware of how Sidebar nav translates to views.
-# Sidebar indices 0..4 = nav (Home/Dashboard/Projects/Tasks/Reporting).
-# Sidebar indices 5..7 = footer items (Notifications/Support/Settings).
-# We map index 1 (Dashboard) and 2 (Projects-ish placeholder) and 7
-# (Settings) to real views; everything else shows a placeholder.
-_DOWNLOADS_INDEX = 1  # we still treat "Dashboard" as the main Dashboard view
+def _make_view(index: int, page: ft.Page, palette: dict[str, str]) -> ft.Container:
+    if index == 0:
+        return build_dashboard_view(palette)
+    if index == 1:
+        return build_downloads_view(page, palette)
+    if index == 2:
+        return build_settings_view(palette)
+    raise ValueError(f"unknown application view: {index}")
 
 
-def _make_view(index: int, page: ft.Page) -> ft.Container:
-    if index == 0:                          # Home
-        return build_dashboard_view()
-    if index == 1:                          # Dashboard / Downloads area
-        return build_downloads_view(page)
-    if index in (5, 6):                     # Notifications / Support
-        return _placeholder("Notifications/Support coming soon")
-    if index == 7:                          # Settings
-        return build_settings_view()
-    return _placeholder(f"Index {index} not implemented yet")
-
-
-def _placeholder(message: str) -> ft.Container:
-    from ui.theme import get_palette as _gp
-    palette = _gp(dark=False)
-    return ft.Container(
-        content=ft.Column(
-            [
-                ft.Text(
-                    message, color=palette["muted"], size=14,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            tight=True,
-        ),
-        padding=24,
-        expand=True,
-        bgcolor=palette["bg"],
-    )
-
-
-def build_app(page: ft.Page) -> ft.Row:
+def build_app(page: ft.Page, dark: bool = True) -> ft.Row:
     """Construct the app shell."""
-    palette = get_palette(dark=True)        # whole app defaults to dark
-    apply_theme(page, dark=True)
+    palette = get_palette(dark=dark)
+    apply_theme(page, dark=dark)
 
     content_area = ft.Container(
-        content=_make_view(1, page),       # start at Dashboard/Downloads
+        content=_make_view(0, page, palette),
         expand=True,
         bgcolor=palette["bg"],
     )
 
     def on_sidebar_select(idx: int) -> None:
-        content_area.content = _make_view(idx, page)
+        content_area.content = _make_view(idx, page, palette)
         page.update()
 
-    sidebar = Sidebar(page, on_change=on_sidebar_select)
+    sidebar = Sidebar(page, on_change=on_sidebar_select, palette=palette)
     sidebar_widget = sidebar.build()
 
+    # The zero spacing keeps the black sidebar flush against the body, like
+    # the ChatGPT/Hermes application shell rather than a floating card.
     return ft.Row(
         [sidebar_widget, content_area],
         expand=True,
-        spacing=8,                         # small gap between panel & body
+        spacing=0,
         tight=False,
     )

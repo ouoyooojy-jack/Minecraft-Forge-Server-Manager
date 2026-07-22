@@ -1,0 +1,47 @@
+[forge]
+metadata_url = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+installer_url_template = "https://maven.minecraftforge.net/net/minecraftforge/forge/{version}/forge-{version}-installer.jar"
+
+[network]
+http_timeout_sec = 60
+download_chunk_size = 65536
+progress_update_hz = 30
+
+[ui]
+default_theme = "dark"
+button_radius = 8
+
+[palette.light]
+bg = "#F8F9FA"              # 柔和淺灰背景
+fg = "#1A1D20"              # 深灰字體（比純黑更自然）
+muted = "#6C757D"            # 次要文字
+border = "#DEE2E6"           # 明顯但不生硬的邊框
+accent = "#0D6EFD"           # 經典藍色強調色
+accent_fg = "#FFFFFF"
+error = "#DC3545"
+error_fg = "#FFFFFF"
+success = "#198754"
+success_fg = "#FFFFFF"
+neutral = "#6C757D"
+neutral_fg = "#FFFFFF"
+rail_bg = "#E9ECEF"          # 側邊欄略深於背景
+surface = "#FFFFFF"          # 卡片為純白（凸顯於淺灰背景上）
+surface_variant = "#F1F3F5"
+
+
+[palette.dark]
+bg = "#121212"
+fg = "#F2F2F2"
+muted = "#A0A0A0"
+border = "#2C2C2C"
+accent = "#E5E5E5"
+accent_fg = "#121212"
+error = "#CF6679"
+error_fg = "#121212"
+success = "#03DAC6"
+success_fg = "#121212"
+neutral = "#9E9E9E"
+neutral_fg = "#121212"
+rail_bg = "#1A1A1A"
+surface = "#1E1E1E"
+surface_variant = "#262626"

@@ -112,7 +112,8 @@ def test_sidebar_collapsed_no_labels():
         if isinstance(c, ft.Text) and c.value
     ]
     nav_label_set = {"Home", "Dashboard", "Projects", "Tasks", "Reporting",
-                     "Notifications", "Support", "Settings"}
+                     "Notifications", "Support", "Settings",
+                     "主頁", "下載", "設定"}
     leaked = nav_label_set & set(texts)
     assert not leaked, f"unexpected labels in collapsed view: {leaked}"
     print(f"[6] collapsed: no nav labels  OK")

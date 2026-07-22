@@ -16,11 +16,11 @@ from ui.views.settings import build_settings_view
 
 def _make_view(index: int, page: ft.Page, palette: dict[str, str]) -> ft.Container:
     if index == 0:
-        return build_dashboard_view(palette)
+        return build_dashboard_view(page, palette)
     if index == 1:
         return build_downloads_view(page, palette)
     if index == 2:
-        return build_settings_view(palette)
+        return build_settings_view(page, palette)
     raise ValueError(f"unknown application view: {index}")
 
 

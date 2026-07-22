@@ -29,17 +29,17 @@ def make_progress_section() -> tuple[ft.ProgressBar, ft.Text]:
 
 # ─── inputs ─────────────────────────────────────────────────
 def make_dropdown(label: str, palette: dict[str, str], **kwargs) -> ft.Dropdown:
-    return ft.Dropdown(
-        label=label,
-        width=320,
-        menu_height=200,
-        border_color=palette["border"],
-        focused_border_color=palette["fg"],
-        bgcolor=palette["bg"],
-        color=palette["fg"],
-        label_style=ft.TextStyle(color=palette["muted"]),
-        **kwargs,
-    )
+    defaults = {
+        "width": 320,
+        "menu_height": 200,
+        "border_color": palette["border"],
+        "focused_border_color": palette["fg"],
+        "bgcolor": palette["bg"],
+        "color": palette["fg"],
+        "label_style": ft.TextStyle(color=palette["muted"]),
+    }
+    defaults.update(kwargs)
+    return ft.Dropdown(label=label, **defaults)
 
 
 # ─── buttons ────────────────────────────────────────────────
@@ -54,18 +54,22 @@ def make_primary_button(
     **kwargs,
 ) -> ft.ElevatedButton:
     """Filled accent button (rounded)."""
-    return ft.ElevatedButton(
-        content=ft.Text(text, color=palette["accent_fg"]),
-        icon=icon,
-        width=320,
-        disabled=True,
-        style=ft.ButtonStyle(
+    # Downloads start disabled until both versions are selected, while other
+    # primary actions (such as saving settings) must be enabled immediately.
+    disabled = kwargs.pop("disabled", True)
+    defaults = {
+        "content": ft.Text(text, color=palette["accent_fg"]),
+        "icon": icon,
+        "width": 320,
+        "disabled": disabled,
+        "style": ft.ButtonStyle(
             shape=_rounded_shape(),
             bgcolor=palette["accent"],
             side=ft.BorderSide(1, palette["border"]),
         ),
-        **kwargs,
-    )
+    }
+    defaults.update(kwargs)
+    return ft.ElevatedButton(**defaults)
 
 
 def make_secondary_button(
@@ -73,9 +77,10 @@ def make_secondary_button(
     palette: dict[str, str],
     **kwargs,
 ) -> ft.OutlinedButton:
+    width = kwargs.pop("width", 320)
     return ft.OutlinedButton(
         content=ft.Text(text, color=palette["fg"]),
-        width=320,
+        width=width,
         style=ft.ButtonStyle(
             shape=_rounded_shape(),
             side=ft.BorderSide(1, palette["border"]),

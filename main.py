@@ -4,11 +4,12 @@ import flet as ft
 from ui.app import build_app
 from ui.title_bar import build_title_bar
 from ui.theme import get_palette
+from config import DEFAULT_THEME
 
 def main(page: ft.Page) -> None:
     page.title = "Mc Server Manager"
-    page.window.width = 720
-    page.window.height = 480
+    page.window.width = 1000
+    page.window.height = 600
     # The application owns the entire title bar, including window controls.
     page.window.title_bar_hidden = True
     page.window.title_bar_buttons_hidden = True
@@ -18,7 +19,7 @@ def main(page: ft.Page) -> None:
     # would centre the Row inside the page and stop the sidebar from
     # hugging the left edge. The Row uses MainAxisAlignment.START on
     # its own; we let it.
-    theme_state = {"dark": True}
+    theme_state = {"dark": DEFAULT_THEME == "dark"}
 
     def rebuild(_event=None) -> None:
         theme_state["dark"] = not theme_state["dark"] if _event else theme_state["dark"]

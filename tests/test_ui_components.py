@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import time
 
+from config import DARK_PALETTE
+from ui.components import make_primary_button
 from ui.throttle import ProgressThrottle
 
 
@@ -45,3 +47,8 @@ def test_throttle_initial_state_is_zero():
     t = ProgressThrottle(hz=10)
     # Reading the attribute directly to confirm
     assert t._last_emit == 0.0
+
+
+def test_primary_button_allows_callers_to_enable_it():
+    button = make_primary_button("Save", DARK_PALETTE, disabled=False)
+    assert button.disabled is False

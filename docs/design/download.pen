@@ -1,0 +1,433 @@
+{
+  "version": "2.14",
+  "children": [
+    {
+      "type": "frame",
+      "id": "window",
+      "x": 0,
+      "y": 0,
+      "theme": {
+        "mode": "dark"
+      },
+      "width": 1280,
+      "height": 720,
+      "fill": "$color.bg",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "title-bar",
+          "width": "fill_container",
+          "fill": "$color.bg",
+          "padding": [
+            0,
+            16
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "title-bar-app-name",
+              "fill": "$color.fg",
+              "content": "Mc Server Manager",
+              "fontFamily": "Inter",
+              "fontSize": "$font.size.small",
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "title-bar-controls",
+              "gap": 16,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "tb-sun",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "sun",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-min",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "minus",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-max",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "square",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-x",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "x",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "fill": "$color.bg",
+          "children": [
+            {
+              "type": "frame",
+              "id": "sidebar",
+              "height": "fill_container",
+              "fill": "$color.rail_bg",
+              "stroke": "$color.border",
+              "strokeWidth": {
+                "right": 1
+              },
+              "layout": "vertical",
+              "gap": 12,
+              "padding": [
+                12,
+                0
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "sb-hamburger",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "menu",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-home",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "house",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-download",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "download",
+                  "library": "lucide",
+                  "fill": "$color.fg"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-settings",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "settings",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "download-content",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "$color.bg",
+              "layout": "vertical",
+              "gap": "$gap.section",
+              "padding": 24,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "download-section",
+                  "width": "fill_container",
+                  "fill": "$color.bg",
+                  "gap": "$gap.field",
+                  "padding": [
+                    24,
+                    0
+                  ],
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "major-version-dd",
+                      "width": 280,
+                      "height": 40,
+                      "fill": "#1E1E1E",
+                      "cornerRadius": 6,
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "mv-label",
+                          "fill": "$color.muted",
+                          "content": "Minecraft 版本",
+                          "fontFamily": "Inter",
+                          "fontSize": "$font.size.tiny",
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "icon",
+                          "id": "mv-chevron",
+                          "width": 14,
+                          "height": 14,
+                          "icon": "chevron-down",
+                          "library": "lucide",
+                          "fill": "$color.muted"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "forge-version-dd",
+                      "width": 280,
+                      "height": 40,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.input",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "justifyContent": "space_between",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "fv-label",
+                          "fill": "$color.muted",
+                          "content": "Forge Server 版本",
+                          "fontFamily": "Inter",
+                          "fontSize": "$font.size.tiny",
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "icon",
+                          "id": "fv-chevron",
+                          "width": 14,
+                          "height": 14,
+                          "icon": "chevron-down",
+                          "library": "lucide",
+                          "fill": "$color.muted"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "download-button",
+                      "width": 280,
+                      "height": 40,
+                      "fill": "$color.accent",
+                      "cornerRadius": "$radius.button",
+                      "layout": "vertical",
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "download-button-label",
+                          "fill": "$color.accent_fg",
+                          "content": "下載 Forge Server Installer",
+                          "fontFamily": "Inter",
+                          "fontSize": "$font.size.body",
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "divider-1",
+                  "width": "fill_container",
+                  "height": 1,
+                  "fill": "$color.border"
+                },
+                {
+                  "type": "frame",
+                  "id": "rename-row",
+                  "width": "fill_container",
+                  "fill": "$color.bg",
+                  "gap": "$gap.field",
+                  "padding": [
+                    16,
+                    0,
+                    0,
+                    0
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "rename-input",
+                      "width": 855,
+                      "height": 43,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.input",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "FUYkd",
+                          "width": 807,
+                          "height": 26,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "zJJhp",
+                              "fill": "$color.muted",
+                              "textGrowth": "fixed-width-height",
+                              "width": 84,
+                              "height": 12,
+                              "content": "forge 1.20.1.jar",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "icon",
+                          "id": "pL6xY",
+                          "width": 24,
+                          "height": 24,
+                          "icon": "trash-simple-light",
+                          "library": "phosphor",
+                          "fill": "#ffffff75"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "themes": {
+    "mode": [
+      "dark"
+    ]
+  },
+  "variables": {
+    "color.bg": {
+      "type": "color",
+      "value": "#121212"
+    },
+    "color.fg": {
+      "type": "color",
+      "value": "#F2F2F2"
+    },
+    "color.muted": {
+      "type": "color",
+      "value": "#A0A0A0"
+    },
+    "color.border": {
+      "type": "color",
+      "value": "#2C2C2C"
+    },
+    "color.accent": {
+      "type": "color",
+      "value": "#E5E5E5"
+    },
+    "color.accent_fg": {
+      "type": "color",
+      "value": "#121212"
+    },
+    "color.surface": {
+      "type": "color",
+      "value": "#1E1E1E"
+    },
+    "color.surface_variant": {
+      "type": "color",
+      "value": "#262626"
+    },
+    "color.rail_bg": {
+      "type": "color",
+      "value": "#1A1A1A"
+    },
+    "font.size.section": {
+      "type": "number",
+      "value": 16
+    },
+    "font.size.body": {
+      "type": "number",
+      "value": 14
+    },
+    "font.size.small": {
+      "type": "number",
+      "value": 12
+    },
+    "font.size.tiny": {
+      "type": "number",
+      "value": 11
+    },
+    "radius.button": {
+      "type": "number",
+      "value": 8
+    },
+    "radius.input": {
+      "type": "number",
+      "value": 6
+    },
+    "gap.section": {
+      "type": "number",
+      "value": 16
+    },
+    "gap.field": {
+      "type": "number",
+      "value": 12
+    },
+    "sidebar.width": {
+      "type": "number",
+      "value": 48
+    },
+    "titlebar.height": {
+      "type": "number",
+      "value": 32
+    }
+  },
+  "fileToken": "772f4d61-03b8-4eb9-8205-9b598dc53dc9"
+}

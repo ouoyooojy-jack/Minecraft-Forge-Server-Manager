@@ -1,0 +1,139 @@
+{
+  "version": "2.14",
+  "themes": { "mode": ["dark"] },
+  "variables": {
+    "color.bg":              { "type": "color", "value": "#121212" },
+    "color.fg":              { "type": "color", "value": "#F2F2F2" },
+    "color.muted":           { "type": "color", "value": "#A0A0A0" },
+    "color.border":          { "type": "color", "value": "#2C2C2C" },
+    "color.accent":          { "type": "color", "value": "#E5E5E5" },
+    "color.accent_fg":       { "type": "color", "value": "#121212" },
+    "color.surface":         { "type": "color", "value": "#1E1E1E" },
+    "color.surface_variant": { "type": "color", "value": "#262626" },
+    "color.rail_bg":         { "type": "color", "value": "#1A1A1A" },
+    "font.size.title":       { "type": "number", "value": 22 },
+    "font.size.body":        { "type": "number", "value": 14 },
+    "font.size.small":       { "type": "number", "value": 12 },
+    "font.size.tiny":        { "type": "number", "value": 11 },
+    "radius.button":         { "type": "number", "value": 8 },
+    "radius.input":          { "type": "number", "value": 6 },
+    "gap.section":           { "type": "number", "value": 12 },
+    "sidebar.width":         { "type": "number", "value": 48 },
+    "titlebar.height":       { "type": "number", "value": 32 }
+  },
+  "children": [
+    {
+      "id": "window",
+      "type": "frame",
+      "theme": { "mode": "dark" },
+      "fill": "$color.bg",
+      "x": 0, "y": 0,
+      "width": 1280, "height": 720,
+      "layout": "vertical",
+      "padding": 0,
+      "gap": 0,
+      "children": [
+        {
+          "id": "title-bar",
+          "type": "frame",
+          "fill": "$color.bg",
+          "width": "fill_container",
+          "height": "$titlebar.height",
+          "layout": "horizontal",
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "padding": [0, 16, 0, 16],
+          "children": [
+            { "id": "title-bar-app-name", "type": "text", "content": "Mc Server Manager", "fill": "$color.fg", "fontSize": "$font.size.small", "textGrowth": "auto" },
+            {
+              "id": "title-bar-controls",
+              "type": "frame",
+              "layout": "horizontal",
+              "gap": 16,
+              "alignItems": "center",
+              "children": [
+                { "id": "tb-sun", "type": "icon", "library": "lucide", "icon": "sun",     "width": 16, "height": 16, "fill": "$color.muted" },
+                { "id": "tb-min", "type": "icon", "library": "lucide", "icon": "minus",   "width": 16, "height": 16, "fill": "$color.muted" },
+                { "id": "tb-max", "type": "icon", "library": "lucide", "icon": "square",  "width": 16, "height": 16, "fill": "$color.muted" },
+                { "id": "tb-x",   "type": "icon", "library": "lucide", "icon": "x",       "width": 16, "height": 16, "fill": "$color.muted" }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "body",
+          "type": "frame",
+          "fill": "$color.bg",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "horizontal",
+          "gap": 0,
+          "children": [
+            {
+              "id": "sidebar",
+              "type": "frame",
+              "fill": "$color.rail_bg",
+              "width": "$sidebar.width",
+              "height": "fill_container",
+              "layout": "vertical",
+              "alignItems": "center",
+              "padding": [12, 0, 12, 0],
+              "gap": 12,
+              "stroke": "$color.border",
+              "strokeWidth": { "right": 1 },
+              "children": [
+                { "id": "sb-hamburger", "type": "icon", "library": "lucide", "icon": "menu",     "width": 20, "height": 20, "fill": "$color.muted" },
+                { "id": "sb-home",      "type": "icon", "library": "lucide", "icon": "house",    "width": 20, "height": 20, "fill": "$color.muted" },
+                { "id": "sb-download",  "type": "icon", "library": "lucide", "icon": "download", "width": 20, "height": 20, "fill": "$color.muted" },
+                { "id": "sb-settings",  "type": "icon", "library": "lucide", "icon": "settings", "width": 20, "height": 20, "fill": "$color.fg" }
+              ]
+            },
+            {
+              "id": "settings-content",
+              "type": "frame",
+              "fill": "$color.bg",
+              "width": "fill_container",
+              "height": "fill_container",
+              "layout": "vertical",
+              "padding": 24,
+              "gap": "$gap.section",
+              "alignItems": "center",
+              "justifyContent": "center",
+              "children": [
+                {
+                  "id": "settings-header",
+                  "type": "frame",
+                  "layout": "vertical",
+                  "gap": 8,
+                  "alignItems": "center",
+                  "children": [
+                    { "id": "settings-title", "type": "text", "content": "App Settings", "fill": "$color.fg", "fontSize": "$font.size.title", "fontWeight": "700", "textAlign": "center", "textGrowth": "auto" },
+                    { "id": "settings-subtitle", "type": "text", "content": "應用程式外觀與網路行為。伺服器設定請在主頁管理。", "fill": "$color.muted", "fontSize": "$font.size.tiny", "textAlign": "center", "textGrowth": "auto" }
+                  ]
+                },
+                { "id": "timeout-input", "type": "frame", "fill": "$color.surface", "stroke": "$color.border", "cornerRadius": "$radius.input", "strokeWidth": 1, "width": 340, "height": 56, "padding": [8, 12, 8, 12], "layout": "vertical", "gap": 2, "children": [
+                  { "id": "to-label", "type": "text", "content": "HTTP 逾時（秒）", "fill": "$color.muted", "fontSize": "$font.size.tiny", "textGrowth": "auto" },
+                  { "id": "to-value", "type": "text", "content": "60",                "fill": "$color.fg",    "fontSize": "$font.size.body", "textGrowth": "auto" }
+                ]},
+                { "id": "progress-input", "type": "frame", "fill": "$color.surface", "stroke": "$color.border", "cornerRadius": "$radius.input", "strokeWidth": 1, "width": 340, "height": 56, "padding": [8, 12, 8, 12], "layout": "vertical", "gap": 2, "children": [
+                  { "id": "ph-label", "type": "text", "content": "進度更新頻率（Hz）", "fill": "$color.muted", "fontSize": "$font.size.tiny", "textGrowth": "auto" },
+                  { "id": "ph-value", "type": "text", "content": "30",                  "fill": "$color.fg",    "fontSize": "$font.size.body", "textGrowth": "auto" }
+                ]},
+                { "id": "theme-input", "type": "frame", "fill": "$color.surface", "stroke": "$color.border", "cornerRadius": "$radius.input", "strokeWidth": 1, "width": 340, "height": 56, "padding": [8, 12, 8, 12], "layout": "horizontal", "justifyContent": "space_between", "alignItems": "center", "children": [
+                  { "id": "th-stack", "type": "frame", "layout": "vertical", "gap": 2, "children": [
+                    { "id": "th-label", "type": "text", "content": "預設主題（下次啟動）", "fill": "$color.muted", "fontSize": "$font.size.tiny", "textGrowth": "auto" },
+                    { "id": "th-value", "type": "text", "content": "dark",                  "fill": "$color.fg",    "fontSize": "$font.size.body", "textGrowth": "auto" }
+                  ]},
+                  { "id": "th-chevron", "type": "icon", "library": "lucide", "icon": "chevron-down", "width": 14, "height": 14, "fill": "$color.muted" }
+                ]},
+                { "id": "save-button", "type": "frame", "fill": "$color.accent", "cornerRadius": "$radius.button", "width": 340, "height": 40, "layout": "vertical", "alignItems": "center", "justifyContent": "center", "children": [
+                  { "id": "save-button-label", "type": "text", "content": "儲存設定", "fill": "$color.accent_fg", "fontSize": "$font.size.body", "textGrowth": "auto" }
+                ]}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

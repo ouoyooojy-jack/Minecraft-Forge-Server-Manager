@@ -30,16 +30,21 @@ URL 樣板(用 Python 的 `str.format()`)比 f-string 好處是:
 - 之後 Forge 改網址結構,只改 `FORGE_INSTALLER_URL_TEMPLATE`
 - 樣板可以在測試裡 regex 驗證
 
-### 2.2 `DEFAULT_DOWNLOAD_DIR = Path("downloads")`
+### 2.2 `DEFAULT_DOWNLOAD_DIR = <project_root>/downloads`
 
-用 `pathlib.Path` 而不是純字串原因:
-- 之後要 `path / filename` 路徑拼接時,字串得自己寫 `os.path.join`
-- type checker 知道這是 Path,IDE 會 autocomplete `.mkdir()`、`.stat()` 等
+固定在專案根目錄的 `downloads/` 子資料夾,**不開放設定**:
 
-相對路徑 = 「執行程式的工作目錄」。對開發者友善。
+- 打包後 exe 旁邊就會看到 `downloads/`,路徑心智模型簡單。
+- 完全不需要處理「相對 / 絕對 / 使用者輸入不存在路徑」三種 corner case。
+- 用 `pathlib.Path` 而不是純字串原因:
+  - 之後要 `path / filename` 路徑拼接時,字串得自己寫 `os.path.join`
+  - type checker 知道這是 Path,IDE 會 autocomplete `.mkdir()`、`.stat()` 等
+- 解析規則(跟 `_settings_path()` 共用 `_project_root()` 輔助):
+  - 打包後(`sys.frozen`):exe 所在目錄
+  - 開發中: `config.py` 所在目錄
 
-如果之後要改成 `%APPDATA%/McServerManager/`(正式安裝用),
-只改這一行。
+如果之後真的需要換位置(例如 `%APPDATA%/McServerManager/`),
+改 `_project_root()` 的 fallback 邏輯就好。
 
 ### 2.3 `HTTP_TIMEOUT_SEC = 60`
 
@@ -75,8 +80,6 @@ ProgressBar 更新頻率,30Hz = 每 33ms 一次:
 
 ## 3. 未來擴充
 
-- **使用者可設定檔** — 如果之後要給使用者改路徑,加 `~/.mcsmanager/config.json`,
-  並在程式啟動時讀它來覆寫 `DEFAULT_DOWNLOAD_DIR`。
 - **環境變數覆寫** — 12-factor app 風格,`MCSM_DOWNLOAD_DIR=/path`
   可覆寫。常數前面都加前綴比較好識別。
 - **設定驗證** — 用 dataclass + `__post_init__`,確保 `DOWNLOAD_CHUNK_SIZE > 0`

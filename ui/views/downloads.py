@@ -1,16 +1,19 @@
-"""Downloads view: version picker + download button + progress.
+"""Downloads view: version picker + download button + dynamic installer list.
 
-Behavioral note (carry-over from the original main_view):
-  - This view owns its own download service + cancel event.
-  - Theme state lives in main_view legacy module (temporarily).
+Layout mirrors docs/design/download.pen:
+  - top row: Minecraft / Forge dropdowns + download button (horizontal)
+  - progress bar + cancel button (between dropdowns and divider)
+  - divider
+  - scrollable list of installer rows, each row: [filename chip] [trash icon]
 
-Future cleanup: pull download service into a shared owner module.
+The list is dynamic — it follows the actual contents of DEFAULT_DOWNLOAD_DIR.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
+from pathlib import Path
 
 import flet as ft
 
@@ -26,18 +29,71 @@ from services.forge_api import get_versions, group_by_mc_major
 from ui.components import (
     make_dropdown,
     make_primary_button,
-    make_progress_section,
     make_secondary_button,
     make_snack,
-    make_status_text,
 )
-from ui.theme import apply_theme, get_palette
+from ui.theme import get_palette
 from ui.throttle import ProgressThrottle
 
 logger = logging.getLogger(__name__)
 
 # Cached across rebuilds to avoid re-fetching on theme toggle.
 _cached_versions: list[str] | None = None
+
+
+def _make_jar_row(
+    page: ft.Page,
+    palette: dict[str, str],
+    jar_path: Path,
+    *,
+    on_delete: "callable",
+    on_rename: "callable",
+) -> ft.Container:
+    """One installer row, per .pen `rename-row` / `rename-input`:
+    an editable filename TextField on the left (rename on submit / blur),
+    a trash icon on the right. Width is `fill_container` so it stretches
+    with the content column.
+    """
+    name_field = ft.TextField(
+        value=jar_path.name,
+        width=580,                          # wide chip, full filename visible (per screenshot)
+        height=26,                          # tall chip to match the row
+        border_radius=6,                    # matches outer row corner radius
+        border_color=palette["border"],
+        focused_border_color=palette["fg"],
+        bgcolor=palette["surface"],
+        color=palette["muted"],             # muted text like a chip
+        text_size=14,                       # larger so the full filename is readable
+        cursor_color=palette["fg"],
+        content_padding=ft.Padding(left=16, right=16, top=8, bottom=8),
+        on_submit=lambda e, p=jar_path: on_rename(p, e.control.value),
+    )
+    # also commit rename on focus loss so users can blur out to save
+    name_field.on_blur = lambda e, p=jar_path: on_rename(p, e.control.value)
+
+    trash = ft.IconButton(
+        icon=ft.Icons.DELETE_OUTLINE,
+        icon_color=palette["muted"],        # grey (per user feedback)
+        icon_size=24,
+        tooltip="刪除此檔案",
+        on_click=lambda _e, p=jar_path: on_delete(p),
+    )
+
+    return ft.Container(
+        content=ft.Row(
+            [name_field, trash],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=12,
+        ),
+        width=665,
+        height=40,                           # taller row to match screenshot
+        border_radius=6,
+        border=ft.Border.all(1, palette["border"]),
+        bgcolor=palette["surface"],
+        padding=ft.Padding(left=12, right=12, top=0, bottom=0),
+        alignment=ft.alignment.Alignment(0, 0),
+    )
 
 
 def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -> ft.Container:
@@ -51,28 +107,106 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
     def major_key(m: str):
         return tuple(int(x) for x in m.split("."))
 
-    # The view must render before contacting Forge Maven.  ``requests`` is
-    # synchronous, so performing it while constructing this view freezes the
-    # Flet UI thread for as long as the HTTP timeout.
     grouped: dict[str, list[str]] = {}
-    status_text = make_status_text(palette, text="正在載入 Forge 版本…")
+    status_text = ft.Text(
+        "正在載入 Forge 版本…",
+        size=12,
+        color=palette["muted"],
+    )
 
+    # ── Top row: 3 widgets side by side, left-aligned ────────────
     major_dropdown = make_dropdown(
-        "Major version",
+        "Minecraft 版本",
         palette,
+        width=280,
         options=[],
         disabled=True,
     )
-    sub_dropdown = make_dropdown("Forge version", palette, disabled=True)
-
-    progress_bar, progress_status = make_progress_section()
+    sub_dropdown = make_dropdown(
+        "Forge Server 版本",
+        palette,
+        width=280,
+        disabled=True,
+    )
     download_button = make_primary_button(
-        "Download installer",
+        "下載 Forge Server Installer",
         palette,
         icon=ft.Icons.FILE_DOWNLOAD_OUTLINED,
     )
-    cancel_button = make_secondary_button("Cancel", palette, visible=False)
 
+    top_row = ft.Row(
+        [major_dropdown, sub_dropdown, download_button],
+        alignment=ft.MainAxisAlignment.START,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=12,
+    )
+
+    # ── Progress (between dropdowns and divider, per user instruction) ──
+    progress_bar = ft.ProgressBar(
+        value=0,
+        width=856,  # matches `rename-input` width
+        height=2,
+        visible=False,
+        color=palette["accent"],
+    )
+    cancel_button = make_secondary_button("Cancel", palette, width=120, visible=False)
+
+    progress_row = ft.Row(
+        [progress_bar, cancel_button],
+        alignment=ft.MainAxisAlignment.START,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=12,
+    )
+
+    # ── Bottom: scrollable dynamic installer list (per .pen `rename-row`) ─
+    list_column = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO)
+
+    def refresh_jars() -> None:
+        DEFAULT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        jars = sorted(DEFAULT_DOWNLOAD_DIR.glob("*.jar"), key=lambda p: p.name.lower())
+        list_column.controls = [
+            _make_jar_row(page, palette, jar,
+                          on_delete=delete_jar,
+                          on_rename=rename_jar)
+            for jar in jars
+        ]
+
+    def delete_jar(jar_path: Path) -> None:
+        if jar_path.is_file() and jar_path.parent.resolve() == DEFAULT_DOWNLOAD_DIR.resolve():
+            jar_path.unlink()
+            status_text.value = f"已刪除 {jar_path.name}"
+            refresh_jars()
+        else:
+            status_text.value = "請選擇 downloads/ 中的 JAR。"
+        page.update()
+
+    def rename_jar(jar_path: Path, new_name: str) -> None:
+        name = (new_name or "").strip()
+        if not name:
+            return  # empty submit is a no-op (don't clobber the user's name)
+        if Path(name).name != name:
+            status_text.value = "請輸入有效檔名（不可含路徑分隔符）。"
+            page.update()
+            return
+        if not (jar_path.is_file() and jar_path.parent.resolve() == DEFAULT_DOWNLOAD_DIR.resolve()):
+            status_text.value = "請選擇 downloads/ 中的 JAR。"
+            page.update()
+            return
+        target = jar_path.with_name(name if name.endswith(".jar") else f"{name}.jar")
+        if target == jar_path:
+            return
+        if target.exists():
+            status_text.value = f"已存在同名檔案：{target.name}"
+            page.update()
+            return
+        jar_path.rename(target)
+        status_text.value = f"已重新命名為 {target.name}"
+        refresh_jars()
+        page.update()
+
+    refresh_jars()
+
+    # ── Event handlers (unchanged from before) ─────────────────────
     def refresh_button_state():
         download_button.disabled = (
             major_dropdown.value is None or sub_dropdown.value is None
@@ -140,7 +274,7 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
         throttle._last_emit = 0.0
         set_ui_busy(True)
         progress_bar.value = 0
-        progress_status.value = f"Starting {version}..."
+        status_text.value = f"正在下載 Forge Server Installer {version}…"
         page.update()
 
         def on_progress(info: ProgressInfo) -> None:
@@ -148,15 +282,15 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
                 return
             pct = info.percent / 100.0
 
-            async def update():
+            async def update() -> None:
                 progress_bar.value = pct
-                progress_status.value = (
+                status_text.value = (
                     f"{info.percent:.1f}% · {info.speed_mbps:.2f} MB/s"
                 )
                 page.update()
             page.run_task(update)
 
-        async def download_flow():
+        async def download_flow() -> None:
             try:
                 saved = await asyncio.to_thread(
                     download_service.download,
@@ -165,29 +299,30 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
                     cancel_event=cancel_event,
                 )
                 progress_bar.value = 1.0
-                progress_status.value = f"Saved → {saved.name}"
+                refresh_jars()
+                status_text.value = f"Saved → {saved.name}"
                 page.snack_bar = make_snack(
                     f"Downloaded: {saved.name}", palette, "success",
                 )
                 page.snack_bar.open = True
             except VersionNotFoundError:
-                progress_status.value = "Version not found"
+                status_text.value = "Version not found"
                 page.snack_bar = make_snack(
                     f"Not on Maven: {version}", palette, "error",
                 )
                 page.snack_bar.open = True
             except NetworkError as exc:
-                progress_status.value = f"Network error: {exc}"
+                status_text.value = f"Network error: {exc}"
                 page.snack_bar = make_snack(
                     f"Network: {exc}", palette, "error",
                 )
                 page.snack_bar.open = True
             except DownloadAbortedError:
-                progress_status.value = "Cancelled"
+                status_text.value = "Cancelled"
                 page.snack_bar = make_snack("Cancelled", palette, "neutral")
                 page.snack_bar.open = True
             except MinecraftServerError as exc:
-                progress_status.value = f"Error: {exc}"
+                status_text.value = f"Error: {exc}"
                 page.snack_bar = make_snack(str(exc), palette, "error")
                 page.snack_bar.open = True
             finally:
@@ -199,7 +334,7 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
     def on_cancel_click(e: ft.ControlEvent):
         cancel_event.set()
         cancel_button.disabled = True
-        progress_status.value = "Cancelling..."
+        status_text.value = "Cancelling..."
         page.update()
 
     major_dropdown.on_select = on_major_select
@@ -217,19 +352,18 @@ def build_downloads_view(page: ft.Page, palette: dict[str, str] | None = None) -
         content=ft.Column(
             [
                 status_text,
-                major_dropdown,
-                sub_dropdown,
-                download_button,
-                cancel_button,
-                progress_bar,
-                progress_status,
+                top_row,
+                progress_row,
+                ft.Divider(color=palette["border"]),
+                list_column,
             ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=14,
-            tight=True,
+            alignment=ft.MainAxisAlignment.START,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+            spacing=16,
+            scroll=ft.ScrollMode.AUTO,
         ),
         padding=24,
-        alignment=ft.alignment.Alignment(0, 0),
+        alignment=ft.alignment.Alignment(-1, -1),
         bgcolor=palette["bg"],
+        expand=True,
     )

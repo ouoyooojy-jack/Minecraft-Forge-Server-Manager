@@ -1,0 +1,820 @@
+{
+  "version": "2.14",
+  "children": [
+    {
+      "type": "frame",
+      "id": "window",
+      "x": 0,
+      "y": 0,
+      "theme": {
+        "mode": "dark"
+      },
+      "width": 1280,
+      "height": 720,
+      "fill": "$color.bg",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "title-bar",
+          "width": "fill_container",
+          "fill": "$color.bg",
+          "padding": [
+            0,
+            16
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "title-bar-app-name",
+              "fill": "$color.fg",
+              "content": "Mc Server Manager",
+              "fontFamily": "Inter",
+              "fontSize": "$font.size.small",
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "title-bar-controls",
+              "gap": 16,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "tb-sun",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "sun",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-min",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "minus",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-max",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "square",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-x",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "x",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "fill": "$color.bg",
+          "children": [
+            {
+              "type": "frame",
+              "id": "sidebar",
+              "height": "fill_container",
+              "fill": "$color.rail_bg",
+              "stroke": "$color.border",
+              "strokeWidth": {
+                "right": 1
+              },
+              "layout": "vertical",
+              "gap": 12,
+              "padding": [
+                12,
+                0
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "sb-hamburger",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "menu",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-home",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "house",
+                  "library": "lucide",
+                  "fill": "$color.fg"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-download",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "download",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "sb-settings",
+                  "width": 20,
+                  "height": 20,
+                  "icon": "settings",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "home-content",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "$color.bg",
+              "layout": "vertical",
+              "gap": "$gap.section",
+              "padding": 24,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "home-header",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 4,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "home-title",
+                      "fill": "$color.fg",
+                      "content": "Forge Server Manager",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.title",
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "text",
+                      "id": "home-subtitle",
+                      "fill": "$color.muted",
+                      "content": "請選擇伺服器資料夾並安裝 Forge。",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.tiny",
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "installer-section",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": "$gap.field",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "installer-header",
+                      "fill": "$color.fg",
+                      "content": "Forge Server Installer",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.section",
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "installer-row-1",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "server-dir-input",
+                          "width": 420,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "server-dir-label",
+                              "fill": "$color.muted",
+                              "content": "伺服器資料夾",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "server-dir-value",
+                              "fill": "$color.fg",
+                              "content": "server",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "memory-input",
+                          "width": 180,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "memory-label",
+                              "fill": "$color.muted",
+                              "content": "記憶體（MB）",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "memory-value",
+                              "fill": "$color.fg",
+                              "content": "2048",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "installer-row-2",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "jar-input",
+                          "width": 420,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "jar-label",
+                              "fill": "$color.muted",
+                              "content": "Forge Server Installer (.jar)",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "jar-value",
+                              "fill": "$color.fg",
+                              "content": "c:\\Users\\USER\\OneDrive\\Desktop\\Mc Server Manag…",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "install-button",
+                          "width": 230,
+                          "height": 40,
+                          "fill": "$color.accent",
+                          "cornerRadius": "$radius.button",
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "install-button-label",
+                              "fill": "$color.accent_fg",
+                              "content": "安裝 Forge",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "divider-1",
+                  "width": "fill_container",
+                  "height": 1,
+                  "fill": "$color.border"
+                },
+                {
+                  "type": "frame",
+                  "id": "server-settings-section",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": "$gap.field",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ss-header",
+                      "fill": "$color.fg",
+                      "content": "Server Settings",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.section",
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ss-row-1",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "eula-checkbox",
+                          "width": 16,
+                          "height": 16,
+                          "fill": "$color.bg",
+                          "cornerRadius": 3,
+                          "stroke": "$color.border",
+                          "strokeWidth": 1
+                        },
+                        {
+                          "type": "text",
+                          "id": "eula-label",
+                          "fill": "$color.fg",
+                          "content": "我同意 Minecraft EULA",
+                          "fontFamily": "Inter",
+                          "fontSize": "$font.size.body",
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "save-srv-button",
+                          "width": 180,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.button",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "save-srv-button-label",
+                              "fill": "$color.fg",
+                              "content": "儲存伺服器設定",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ss-row-2",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "motd-input",
+                          "width": 420,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "motd-label",
+                              "fill": "$color.muted",
+                              "content": "伺服器名稱（MOTD）",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "motd-value",
+                              "fill": "$color.fg",
+                              "content": "A Minecraft Server",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "port-input",
+                          "width": 180,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "port-label",
+                              "fill": "$color.muted",
+                              "content": "連接埠",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "port-value",
+                              "fill": "$color.fg",
+                              "content": "25565",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "max-players-input",
+                          "width": 180,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "mp-label",
+                              "fill": "$color.muted",
+                              "content": "最大玩家數",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "text",
+                              "id": "mp-value",
+                              "fill": "$color.fg",
+                              "content": "20",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "gamemode-input",
+                          "width": 180,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "space_between",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "gm-label",
+                              "fill": "$color.fg",
+                              "content": "survival",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            },
+                            {
+                              "type": "icon",
+                              "id": "gm-chevron",
+                              "width": 14,
+                              "height": 14,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$color.muted"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "divider-2",
+                  "width": "fill_container",
+                  "height": 1,
+                  "fill": "$color.border"
+                },
+                {
+                  "type": "frame",
+                  "id": "terminal-section",
+                  "width": "fill_container",
+                  "height": "fill_container",
+                  "layout": "vertical",
+                  "gap": "$gap.field",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "term-header",
+                      "fill": "$color.fg",
+                      "content": "Terminal",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.section",
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "term-buttons",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "start-button",
+                          "width": 280,
+                          "height": 40,
+                          "fill": "$color.accent",
+                          "cornerRadius": "$radius.button",
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "start-button-label",
+                              "fill": "$color.accent_fg",
+                              "content": "啟動伺服器",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "stop-button",
+                          "width": 280,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.button",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "stop-button-label",
+                              "fill": "$color.fg",
+                              "content": "停止",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "terminal-output",
+                      "width": 1195,
+                      "height": 166,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.input",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1
+                    },
+                    {
+                      "type": "frame",
+                      "id": "term-input-row",
+                      "width": "fill_container",
+                      "gap": "$gap.field",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "term-input",
+                          "width": "fill_container",
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.input",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            12
+                          ],
+                          "justifyContent": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "term-input-label",
+                              "fill": "$color.muted",
+                              "content": "終端指令",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.tiny",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "send-button",
+                          "width": 90,
+                          "height": 40,
+                          "fill": "$color.surface",
+                          "cornerRadius": "$radius.button",
+                          "stroke": "$color.border",
+                          "strokeWidth": 1,
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "send-button-label",
+                              "fill": "$color.fg",
+                              "content": "送出",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "themes": {
+    "mode": [
+      "dark"
+    ]
+  },
+  "variables": {
+    "color.bg": {
+      "type": "color",
+      "value": "#121212"
+    },
+    "color.fg": {
+      "type": "color",
+      "value": "#F2F2F2"
+    },
+    "color.muted": {
+      "type": "color",
+      "value": "#A0A0A0"
+    },
+    "color.border": {
+      "type": "color",
+      "value": "#2C2C2C"
+    },
+    "color.accent": {
+      "type": "color",
+      "value": "#E5E5E5"
+    },
+    "color.accent_fg": {
+      "type": "color",
+      "value": "#121212"
+    },
+    "color.surface": {
+      "type": "color",
+      "value": "#1E1E1E"
+    },
+    "color.surface_variant": {
+      "type": "color",
+      "value": "#262626"
+    },
+    "color.rail_bg": {
+      "type": "color",
+      "value": "#1A1A1A"
+    },
+    "font.size.title": {
+      "type": "number",
+      "value": 22
+    },
+    "font.size.section": {
+      "type": "number",
+      "value": 16
+    },
+    "font.size.body": {
+      "type": "number",
+      "value": 14
+    },
+    "font.size.small": {
+      "type": "number",
+      "value": 12
+    },
+    "font.size.tiny": {
+      "type": "number",
+      "value": 11
+    },
+    "radius.button": {
+      "type": "number",
+      "value": 8
+    },
+    "radius.input": {
+      "type": "number",
+      "value": 6
+    },
+    "gap.section": {
+      "type": "number",
+      "value": 16
+    },
+    "gap.field": {
+      "type": "number",
+      "value": 12
+    },
+    "sidebar.width": {
+      "type": "number",
+      "value": 48
+    },
+    "titlebar.height": {
+      "type": "number",
+      "value": 32
+    }
+  },
+  "fileToken": "dbe0832b-9943-4d61-8f32-5788127b112e"
+}

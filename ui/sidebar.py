@@ -86,7 +86,6 @@ class Sidebar:
             alignment=ft.alignment.Alignment(-1 if self._expanded else 0, 0),
             padding=ft.Padding(left=10 if self._expanded else 0, top=0, right=8, bottom=0),
             on_click=lambda _e, i=index: self.select(i),
-            ink=True,
         )
 
     def _content(self) -> ft.Control:

@@ -1,0 +1,1108 @@
+{
+  "version": "2.14",
+  "children": [
+    {
+      "type": "frame",
+      "id": "window",
+      "x": 0,
+      "y": 0,
+      "theme": {
+        "mode": "light"
+      },
+      "width": 1280,
+      "height": 720,
+      "fill": "$color.bg",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "title-bar",
+          "width": "fill_container",
+          "fill": "$color.bg",
+          "padding": [
+            0,
+            14,
+            0,
+            18
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "tb-name",
+              "fill": "$color.muted",
+              "content": "Mc Server Manager",
+              "fontFamily": "Inter",
+              "fontSize": "$font.size.small",
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "tb-controls",
+              "gap": 18,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "tb-moon",
+                  "width": 15,
+                  "height": 15,
+                  "icon": "moon",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-min",
+                  "width": 15,
+                  "height": 15,
+                  "icon": "minus",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-max",
+                  "width": 13,
+                  "height": 13,
+                  "icon": "square",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "icon",
+                  "id": "tb-x",
+                  "width": 15,
+                  "height": 15,
+                  "icon": "x",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "children": [
+            {
+              "type": "frame",
+              "id": "sidebar",
+              "height": "fill_container",
+              "fill": "$color.rail",
+              "layout": "vertical",
+              "gap": 10,
+              "padding": [
+                18,
+                0
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "sb-menu",
+                  "width": 19,
+                  "height": 19,
+                  "icon": "menu",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "frame",
+                  "id": "sb-gap",
+                  "width": 20,
+                  "height": 10
+                },
+                {
+                  "type": "frame",
+                  "id": "sb-home-pill",
+                  "width": 40,
+                  "height": 40,
+                  "fill": "$color.surface",
+                  "cornerRadius": "$radius.button",
+                  "stroke": "$color.border",
+                  "strokeWidth": 1,
+                  "layout": "vertical",
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "sb-home",
+                      "width": 19,
+                      "height": 19,
+                      "icon": "house",
+                      "library": "lucide",
+                      "fill": "$color.accent"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "sb-dl-pill",
+                  "width": 40,
+                  "height": 40,
+                  "layout": "vertical",
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "sb-download",
+                      "width": 19,
+                      "height": 19,
+                      "icon": "download",
+                      "library": "lucide",
+                      "fill": "$color.muted"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "sb-set-pill",
+                  "width": 40,
+                  "height": 40,
+                  "layout": "vertical",
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "sb-settings",
+                      "width": 19,
+                      "height": 19,
+                      "icon": "settings",
+                      "library": "lucide",
+                      "fill": "$color.muted"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "content",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "$color.bg",
+              "layout": "vertical",
+              "gap": 24,
+              "padding": [
+                34,
+                40,
+                28,
+                40
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "header",
+                  "width": "fill_container",
+                  "justifyContent": "space_between",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "h-title",
+                      "fill": "$color.fg",
+                      "content": "Forge Server Manager",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.hero",
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "new-split",
+                      "height": 42,
+                      "fill": "$color.accent",
+                      "cornerRadius": "$radius.button",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "ns-main",
+                          "height": 42,
+                          "layout": "vertical",
+                          "padding": [
+                            0,
+                            16,
+                            0,
+                            18
+                          ],
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "text",
+                              "id": "ns-label",
+                              "fill": "$color.accent_fg",
+                              "content": "新增伺服器",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.body",
+                              "fontWeight": "600"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "ns-divider",
+                          "width": 1,
+                          "height": 22,
+                          "fill": "$color.divider_on_accent"
+                        },
+                        {
+                          "type": "frame",
+                          "id": "ns-caret",
+                          "width": 38,
+                          "height": 42,
+                          "layout": "vertical",
+                          "justifyContent": "center",
+                          "alignItems": "center",
+                          "children": [
+                            {
+                              "type": "icon",
+                              "id": "ns-icon",
+                              "width": 16,
+                              "height": 16,
+                              "icon": "chevron-down",
+                              "library": "lucide",
+                              "fill": "$color.accent_fg"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "cards",
+                  "width": "fill_container",
+                  "gap": "$gap.card",
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "card-1",
+                      "width": 262,
+                      "height": 208,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.card",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "padding": 20,
+                      "justifyContent": "space_between",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "c1-top",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 14,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c1-badge",
+                              "height": 26,
+                              "fill": "$color.green_soft",
+                              "cornerRadius": "$radius.pill",
+                              "gap": 7,
+                              "padding": [
+                                0,
+                                12,
+                                0,
+                                10
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c1-dot",
+                                  "width": 8,
+                                  "height": 8,
+                                  "icon": "circle",
+                                  "library": "lucide",
+                                  "fill": "$color.green"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c1-state",
+                                  "fill": "$color.green",
+                                  "content": "執行中",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.tiny",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c1-name-block",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 5,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "c1-name",
+                                  "fill": "$color.fg",
+                                  "content": "生存世界",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.card",
+                                  "fontWeight": "600"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c1-meta",
+                                  "fill": "$color.muted",
+                                  "content": "1.20.1 · Forge 47.2.0",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "id": "c1-players",
+                              "fill": "$color.muted",
+                              "content": "12 位玩家在線 · 已運行 4 小時",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.small",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "c1-actions",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c1-console",
+                              "width": "fill_container",
+                              "height": 36,
+                              "fill": "$color.surface_2",
+                              "cornerRadius": "$radius.button",
+                              "gap": 7,
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c1-ci",
+                                  "width": 15,
+                                  "height": 15,
+                                  "icon": "terminal",
+                                  "library": "lucide",
+                                  "fill": "$color.fg"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c1-cl",
+                                  "fill": "$color.fg",
+                                  "content": "主控台",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c1-more",
+                              "width": 40,
+                              "height": 36,
+                              "fill": "$color.surface_2",
+                              "cornerRadius": "$radius.button",
+                              "layout": "vertical",
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c1-mi",
+                                  "width": 16,
+                                  "height": 16,
+                                  "icon": "ellipsis",
+                                  "library": "lucide",
+                                  "fill": "$color.muted"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "card-2",
+                      "width": 262,
+                      "height": 208,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.card",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "padding": 20,
+                      "justifyContent": "space_between",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "c2-top",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 14,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c2-badge",
+                              "height": 26,
+                              "fill": "$color.amber_soft",
+                              "cornerRadius": "$radius.pill",
+                              "gap": 7,
+                              "padding": [
+                                0,
+                                12,
+                                0,
+                                10
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c2-dot",
+                                  "width": 8,
+                                  "height": 8,
+                                  "icon": "circle",
+                                  "library": "lucide",
+                                  "fill": "$color.amber"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c2-state",
+                                  "fill": "$color.amber",
+                                  "content": "啟動中",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.tiny",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c2-name-block",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 5,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "c2-name",
+                                  "fill": "$color.fg",
+                                  "content": "創造平台",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.card",
+                                  "fontWeight": "600"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c2-meta",
+                                  "fill": "$color.muted",
+                                  "content": "1.20.4 · Forge 49.0.30",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "id": "c2-players",
+                              "fill": "$color.muted",
+                              "content": "正在載入世界 · 62%",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.small",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "c2-actions",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c2-console",
+                              "width": "fill_container",
+                              "height": 36,
+                              "fill": "$color.surface_2",
+                              "cornerRadius": "$radius.button",
+                              "gap": 7,
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c2-ci",
+                                  "width": 15,
+                                  "height": 15,
+                                  "icon": "terminal",
+                                  "library": "lucide",
+                                  "fill": "$color.fg"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c2-cl",
+                                  "fill": "$color.fg",
+                                  "content": "主控台",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c2-more",
+                              "width": 40,
+                              "height": 36,
+                              "fill": "$color.surface_2",
+                              "cornerRadius": "$radius.button",
+                              "layout": "vertical",
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c2-mi",
+                                  "width": 16,
+                                  "height": 16,
+                                  "icon": "ellipsis",
+                                  "library": "lucide",
+                                  "fill": "$color.muted"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "card-3",
+                      "width": 262,
+                      "height": 208,
+                      "fill": "$color.surface",
+                      "cornerRadius": "$radius.card",
+                      "stroke": "$color.border",
+                      "strokeWidth": 1,
+                      "layout": "vertical",
+                      "padding": 20,
+                      "justifyContent": "space_between",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "c3-top",
+                          "width": "fill_container",
+                          "layout": "vertical",
+                          "gap": 14,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c3-badge",
+                              "height": 26,
+                              "fill": "$color.grey_soft",
+                              "cornerRadius": "$radius.pill",
+                              "gap": 7,
+                              "padding": [
+                                0,
+                                12,
+                                0,
+                                10
+                              ],
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c3-dot",
+                                  "width": 8,
+                                  "height": 8,
+                                  "icon": "circle",
+                                  "library": "lucide",
+                                  "fill": "$color.muted"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c3-state",
+                                  "fill": "$color.muted",
+                                  "content": "已停止",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.tiny",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c3-name-block",
+                              "width": "fill_container",
+                              "layout": "vertical",
+                              "gap": 5,
+                              "children": [
+                                {
+                                  "type": "text",
+                                  "id": "c3-name",
+                                  "fill": "$color.fg",
+                                  "content": "ATM9 模組包",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.card",
+                                  "fontWeight": "600"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c3-meta",
+                                  "fill": "$color.muted",
+                                  "content": "1.20.1 · Forge 47.2.20",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "normal"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "text",
+                              "id": "c3-players",
+                              "fill": "$color.muted",
+                              "content": "上次執行：昨天 22:14",
+                              "fontFamily": "Inter",
+                              "fontSize": "$font.size.small",
+                              "fontWeight": "normal"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "frame",
+                          "id": "c3-actions",
+                          "width": "fill_container",
+                          "gap": 8,
+                          "children": [
+                            {
+                              "type": "frame",
+                              "id": "c3-start",
+                              "width": "fill_container",
+                              "height": 36,
+                              "fill": "$color.accent_soft",
+                              "cornerRadius": "$radius.button",
+                              "gap": 7,
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c3-si",
+                                  "width": 14,
+                                  "height": 14,
+                                  "icon": "play",
+                                  "library": "lucide",
+                                  "fill": "$color.accent"
+                                },
+                                {
+                                  "type": "text",
+                                  "id": "c3-sl",
+                                  "fill": "$color.accent",
+                                  "content": "啟動",
+                                  "fontFamily": "Inter",
+                                  "fontSize": "$font.size.small",
+                                  "fontWeight": "600"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "frame",
+                              "id": "c3-more",
+                              "width": 40,
+                              "height": 36,
+                              "fill": "$color.surface_2",
+                              "cornerRadius": "$radius.button",
+                              "layout": "vertical",
+                              "justifyContent": "center",
+                              "alignItems": "center",
+                              "children": [
+                                {
+                                  "type": "icon",
+                                  "id": "c3-mi",
+                                  "width": 16,
+                                  "height": 16,
+                                  "icon": "ellipsis",
+                                  "library": "lucide",
+                                  "fill": "$color.muted"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "detail-dropdown",
+      "x": 1360,
+      "y": 0,
+      "theme": {
+        "mode": "light"
+      },
+      "width": 420,
+      "height": 320,
+      "fill": "$color.bg",
+      "layout": "vertical",
+      "gap": 16,
+      "padding": 28,
+      "children": [
+        {
+          "type": "text",
+          "id": "dd-caption",
+          "fill": "$color.muted",
+          "content": "細部：「新增伺服器」的下拉選單",
+          "fontFamily": "Inter",
+          "fontSize": "$font.size.tiny",
+          "fontWeight": "normal"
+        },
+        {
+          "type": "frame",
+          "id": "dd-split",
+          "height": 42,
+          "fill": "$color.accent",
+          "cornerRadius": "$radius.button",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "dd-main",
+              "height": 42,
+              "layout": "vertical",
+              "padding": [
+                0,
+                16,
+                0,
+                18
+              ],
+              "justifyContent": "center",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "dd-label",
+                  "fill": "$color.accent_fg",
+                  "content": "新增伺服器",
+                  "fontFamily": "Inter",
+                  "fontSize": "$font.size.body",
+                  "fontWeight": "600"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "dd-divider",
+              "width": 1,
+              "height": 22,
+              "fill": "$color.divider_on_accent"
+            },
+            {
+              "type": "frame",
+              "id": "dd-caret",
+              "width": 38,
+              "height": 42,
+              "layout": "vertical",
+              "justifyContent": "center",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "dd-icon",
+                  "width": 16,
+                  "height": 16,
+                  "icon": "chevron-down",
+                  "library": "lucide",
+                  "fill": "$color.accent_fg"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "dd-menu",
+          "width": 300,
+          "fill": "$color.surface",
+          "cornerRadius": "$radius.card",
+          "stroke": "$color.border",
+          "strokeWidth": 1,
+          "layout": "vertical",
+          "gap": 2,
+          "padding": 8,
+          "children": [
+            {
+              "type": "frame",
+              "id": "dd-item-1",
+              "width": "fill_container",
+              "height": 54,
+              "fill": "$color.accent_soft",
+              "cornerRadius": "$radius.button",
+              "gap": 12,
+              "padding": [
+                0,
+                12
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "dd-i1-icon",
+                  "width": 17,
+                  "height": 17,
+                  "icon": "plus",
+                  "library": "lucide",
+                  "fill": "$color.accent"
+                },
+                {
+                  "type": "frame",
+                  "id": "dd-i1-text",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "dd-i1-t",
+                      "fill": "$color.fg",
+                      "content": "建立新伺服器",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.small",
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "dd-i1-s",
+                      "fill": "$color.muted",
+                      "content": "選擇 Forge 版本並安裝",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.tiny",
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "dd-item-2",
+              "width": "fill_container",
+              "height": 54,
+              "cornerRadius": "$radius.button",
+              "gap": 12,
+              "padding": [
+                0,
+                12
+              ],
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "dd-i2-icon",
+                  "width": 17,
+                  "height": 17,
+                  "icon": "folder-open",
+                  "library": "lucide",
+                  "fill": "$color.muted"
+                },
+                {
+                  "type": "frame",
+                  "id": "dd-i2-text",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "dd-i2-t",
+                      "fill": "$color.fg",
+                      "content": "匯入現有資料夾…",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.small",
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "dd-i2-s",
+                      "fill": "$color.muted",
+                      "content": "已經裝好 Forge 的伺服器",
+                      "fontFamily": "Inter",
+                      "fontSize": "$font.size.tiny",
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "dd-note",
+          "fill": "$color.faint",
+          "content": "主要區域＝直接建立；只有右側箭頭會展開選單。",
+          "fontFamily": "Inter",
+          "fontSize": "$font.size.tiny",
+          "fontWeight": "normal"
+        }
+      ]
+    }
+  ],
+  "themes": {
+    "mode": [
+      "light"
+    ]
+  },
+  "variables": {
+    "color.bg": {
+      "type": "color",
+      "value": "#FAF9F7"
+    },
+    "color.rail": {
+      "type": "color",
+      "value": "#F2EFEA"
+    },
+    "color.surface": {
+      "type": "color",
+      "value": "#FFFFFF"
+    },
+    "color.surface_2": {
+      "type": "color",
+      "value": "#F4F1EC"
+    },
+    "color.border": {
+      "type": "color",
+      "value": "#E6E1D9"
+    },
+    "color.fg": {
+      "type": "color",
+      "value": "#23201C"
+    },
+    "color.muted": {
+      "type": "color",
+      "value": "#8A837A"
+    },
+    "color.faint": {
+      "type": "color",
+      "value": "#B3ABA0"
+    },
+    "color.accent": {
+      "type": "color",
+      "value": "#B4530A"
+    },
+    "color.accent_fg": {
+      "type": "color",
+      "value": "#FFFFFF"
+    },
+    "color.accent_soft": {
+      "type": "color",
+      "value": "#FBEDE1"
+    },
+    "color.divider_on_accent": {
+      "type": "color",
+      "value": "#FFFFFF3D"
+    },
+    "color.green": {
+      "type": "color",
+      "value": "#2F7A55"
+    },
+    "color.green_soft": {
+      "type": "color",
+      "value": "#E4F0EA"
+    },
+    "color.amber": {
+      "type": "color",
+      "value": "#9A6700"
+    },
+    "color.amber_soft": {
+      "type": "color",
+      "value": "#FBF0DA"
+    },
+    "color.red": {
+      "type": "color",
+      "value": "#B42318"
+    },
+    "color.red_soft": {
+      "type": "color",
+      "value": "#FBE9E7"
+    },
+    "color.grey_soft": {
+      "type": "color",
+      "value": "#EFECE7"
+    },
+    "font.size.hero": {
+      "type": "number",
+      "value": 34
+    },
+    "font.size.card": {
+      "type": "number",
+      "value": 22
+    },
+    "font.size.panel": {
+      "type": "number",
+      "value": 16
+    },
+    "font.size.body": {
+      "type": "number",
+      "value": 14
+    },
+    "font.size.small": {
+      "type": "number",
+      "value": 12
+    },
+    "font.size.tiny": {
+      "type": "number",
+      "value": 11
+    },
+    "radius.card": {
+      "type": "number",
+      "value": 16
+    },
+    "radius.button": {
+      "type": "number",
+      "value": 10
+    },
+    "radius.pill": {
+      "type": "number",
+      "value": 999
+    },
+    "gap.card": {
+      "type": "number",
+      "value": 22
+    },
+    "sidebar.width": {
+      "type": "number",
+      "value": 64
+    },
+    "titlebar.height": {
+      "type": "number",
+      "value": 36
+    }
+  },
+  "fileToken": "7672eb9a-7d1f-4c00-bd5e-470ea825842d"
+}

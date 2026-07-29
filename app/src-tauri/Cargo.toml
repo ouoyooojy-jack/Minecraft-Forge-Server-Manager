@@ -1,0 +1,56 @@
+[package]
+name = "mc-server-manager"
+version = "0.1.0"
+description = "Minecraft Forge server manager"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+# The binary is a thin shim over this; keeping the logic in a lib lets the
+# core modules be unit-tested without launching a window.
+name = "mc_server_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Native folder picker for "import an existing server".
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "io-util",
+    "sync",
+    "time",
+    "fs",
+    "net",
+] }
+
+# default-features off drops the blocking client, cookies, gzip, and charset
+# machinery none of this needs. native-tls means schannel on Windows — the
+# system's TLS, rather than bundling rustls plus a root store into the exe.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+# Unpacking the JRE archive Adoptium ships. deflate only — no bzip2/zstd/aes,
+# none of which a JDK zip uses, all of which are weight in the exe.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+window-vibrancy = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+# Smallest binary that still panics usefully. Tauri's own recommendation.
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

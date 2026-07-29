@@ -57,3 +57,23 @@ downloads/
 
 # Hermes planning files stay local (these are conversation artifacts, not source)
 .hermes/
+
+# ── Rust / Tauri ──────────────────────────────────────────────
+# Build output. Also covered by app/.gitignore; repeated here so a target/ that
+# appears anywhere (a stray cargo run from the repo root) is still ignored.
+target/
+# Tauri's generated capability schemas
+app/src-tauri/gen/
+
+# Machine-specific cargo config — it points target-dir outside OneDrive, and
+# that absolute path is not portable to another clone.
+.cargo/
+
+# ── Node / Vite ───────────────────────────────────────────────
+node_modules/
+# `dist/` is already listed under packaging above and covers app/dist.
+
+# ── Derived analysis ──────────────────────────────────────────
+# Knowledge-graph output from /graphify. Regenerable, and it describes the
+# Python code being replaced.
+graphify-out/

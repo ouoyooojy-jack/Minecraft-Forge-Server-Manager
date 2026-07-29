@@ -18,6 +18,9 @@ import {
   type LogLine,
   type ServerConfig,
   type ModFile,
+  type AgentSettings,
+  type RemoteHost,
+  type RemoteServer,
   type ServerFile,
   type ServerId,
   type ServerProperties,
@@ -114,6 +117,60 @@ export const addMods = (id: ServerId, paths: string[]) =>
 
 export const deleteMod = (id: ServerId, name: string) =>
   invoke<void>("delete_mod", { id, name });
+
+// ── remote hosts ────────────────────────────────────────────
+
+export const listRemotes = () => invoke<RemoteHost[]>("list_remotes");
+
+/** Add or update. An empty id means new; the stored entry comes back. */
+export const saveRemote = (host: RemoteHost) =>
+  invoke<RemoteHost>("save_remote", { host });
+
+export const deleteRemote = (id: string) =>
+  invoke<void>("delete_remote", { id });
+
+/** Connect and look at the folder. Resolves with what it found there. */
+export const testRemote = (id: string) => invoke<string>("test_remote", { id });
+
+/** The host key fingerprint, to read before trusting it. */
+export const remoteFingerprint = (id: string) =>
+  invoke<string>("remote_fingerprint", { id });
+
+/** Record the host key in `known_hosts`. Only after the user has seen it. */
+export const trustRemote = (id: string) => invoke<void>("trust_remote", { id });
+
+/** The servers on that machine. `app` transport only. */
+export const remoteServers = (id: string) =>
+  invoke<RemoteServer[]>("remote_servers", { id });
+
+/** `server` names which server on the far side — required over `app`,
+ *  ignored over `ssh`, where the host entry points at one folder already. */
+export const readRemoteFile = (
+  id: string,
+  server: string | null,
+  file: ServerFile,
+) => invoke<string>("read_remote_file", { id, server, file });
+
+export const writeRemoteFile = (
+  id: string,
+  server: string | null,
+  file: ServerFile,
+  text: string,
+) => invoke<void>("write_remote_file", { id, server, file, text });
+
+// ── this machine's listener ─────────────────────────────────
+
+export const getAgentSettings = () =>
+  invoke<AgentSettings>("get_agent_settings");
+
+/** Switch it on or off, or move the port. Binds immediately, so a port already
+ *  in use rejects here instead of failing silently later. */
+export const setAgentSettings = (enabled: boolean, port: number) =>
+  invoke<AgentSettings>("set_agent_settings", { enabled, port });
+
+/** New pairing code. Everyone holding the old one loses access. */
+export const regenerateAgentToken = () =>
+  invoke<AgentSettings>("regenerate_agent_token");
 
 // ── java ────────────────────────────────────────────────────
 

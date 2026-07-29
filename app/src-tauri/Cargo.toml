@@ -42,12 +42,21 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "fs",
+    "net",
 ] }
 
 # default-features off drops the blocking client, cookies, gzip, and charset
 # machinery none of this needs. native-tls means schannel on Windows — the
 # system's TLS, rather than bundling rustls plus a root store into the exe.
 reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+
+# Challenge-response for the remote-access listener: the pairing code is never
+# sent over the wire, only an HMAC of the server's nonce. Both are tiny and
+# pure Rust — no C, no second crypto stack.
+sha2 = "0.10"
+hmac = "0.12"
+# Nonces and pairing codes. The OS generator, not a seeded PRNG.
+getrandom = "0.3"
 
 # Unpacking the JRE archive Adoptium ships. deflate only — no bzip2/zstd/aes,
 # none of which a JDK zip uses, all of which are weight in the exe.
@@ -58,9 +67,6 @@ window-vibrancy = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
-# Only the tests need sockets — they serve downloads over loopback. Kept out of
-# the release build's feature set, where nothing opens one.
-tokio = { version = "1", features = ["net"] }
 
 [profile.release]
 # Smallest binary that still panics usefully. Tauri's own recommendation.

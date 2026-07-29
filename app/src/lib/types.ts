@@ -69,7 +69,53 @@ export type Difficulty = "peaceful" | "easy" | "normal" | "hard";
  * The files the raw editor may open. The core maps these to paths, so the UI
  * can never name a file outside the server folder.
  */
-export type ServerFile = "properties" | "jvmArgs";
+export type ServerFile = "properties" | "jvmArgs" | "runScript";
+
+/**
+ * A machine reachable over SSH — a friend's PC on the VPN, in practice.
+ *
+ * Carries no credentials: authentication is the system `ssh` client's job,
+ * using the keys and `known_hosts` already on this machine.
+ */
+export interface RemoteHost {
+  /** Empty when creating; the core assigns one on save. */
+  id: string;
+  label: string;
+  host: string;
+  transport: Transport;
+  /** Pairing code shown by the other machine's app. `app` transport only. */
+  token: string | null;
+  /** `ssh` transport only. */
+  user: string;
+  port: number;
+  /** `null` lets ssh pick from its own defaults. */
+  keyPath: string | null;
+  /** The server folder on that machine. `ssh` transport only. */
+  dir: string;
+}
+
+/**
+ * How this app reaches a remote machine.
+ *
+ * `app` — the other side runs this app with remote access on. Nothing to
+ * install, a pairing code instead of a key.
+ * `ssh` — the system ssh client, for a machine that does not run this app.
+ */
+export type Transport = "app" | "ssh";
+
+/** One server on a remote machine. */
+export interface RemoteServer {
+  id: string;
+  name: string;
+}
+
+/** This machine's own listener. Off until switched on. */
+export interface AgentSettings {
+  enabled: boolean;
+  port: number;
+  /** The pairing code to read out to whoever should have access. */
+  token: string;
+}
 
 /** The subset of server.properties the settings modal edits. */
 export interface ServerProperties {
@@ -161,6 +207,7 @@ export type CoreEvent =
   | { type: "serverState"; id: ServerId; state: ServerState; light: StatusLight }
   | { type: "serverLog"; id: ServerId; lines: LogLine[] }
   | { type: "serversChanged" }
+  | { type: "agentActivity"; line: string }
   // Rust tags this newtype variant internally, so the progress fields sit
   // alongside `type` rather than nested under a key.
   | ({ type: "download" } & DownloadProgress)

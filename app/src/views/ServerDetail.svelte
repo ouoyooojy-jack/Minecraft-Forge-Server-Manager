@@ -70,6 +70,7 @@
   const FILES: [ServerFile, string, string][] = [
     ["properties", "server.properties", "Minecraft 的完整設定檔"],
     ["jvmArgs", "user_jvm_args.txt", "JVM 參數，含 -Xmx 記憶體上限"],
+    ["runScript", "run.bat", "啟動腳本；這個 app 從裡面讀啟動參數"],
   ];
 
   let server = $state<ServerSummary | null>(null);
@@ -648,7 +649,11 @@
   <JavaPrompt bind:open={javaOpen} major={javaMajor} onready={start} />
 {/if}
 
-<Modal bind:open={fileOpen} title={fileWhich === "properties" ? "server.properties" : "user_jvm_args.txt"} width={640}>
+<Modal
+  bind:open={fileOpen}
+  title={FILES.find(([f]) => f === fileWhich)?.[1] ?? ""}
+  width={640}
+>
   {#if isUp}
     <p class="modal-warn">伺服器執行中。關閉伺服器時會覆寫這個檔案，現在存檔不會生效。</p>
   {/if}

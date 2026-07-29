@@ -11,6 +11,7 @@
   import TitleBar from "./lib/TitleBar.svelte";
   import Downloads from "./views/Downloads.svelte";
   import Home from "./views/Home.svelte";
+  import Remote from "./views/Remote.svelte";
   import ServerDetail from "./views/ServerDetail.svelte";
   import Settings from "./views/Settings.svelte";
   import UpdatePrompt from "./lib/UpdatePrompt.svelte";
@@ -41,6 +42,8 @@
         />
       {:else if selected === 1}
         <Downloads />
+      {:else if selected === 2}
+        <Remote />
       {:else}
         <Settings />
       {/if}

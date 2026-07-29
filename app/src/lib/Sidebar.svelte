@@ -13,6 +13,7 @@
   const DESTS: Dest[] = [
     { label: "主頁", icon: "home" },
     { label: "下載", icon: "download" },
+    { label: "遠端", icon: "server" },
     { label: "設定", icon: "settings-2" },
   ];
 

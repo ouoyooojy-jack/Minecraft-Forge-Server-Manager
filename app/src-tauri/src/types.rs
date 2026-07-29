@@ -200,6 +200,10 @@ pub fn is_installed(dir: &std::path::Path) -> bool {
 pub enum ServerFile {
     Properties,
     JvmArgs,
+    /// Forge's launch script. Not executed by this app — it is read for the
+    /// argument-file paths inside it — but editing it is still the way people
+    /// tweak a server, so it is editable here and remotely.
+    RunScript,
 }
 
 impl ServerFile {
@@ -207,8 +211,54 @@ impl ServerFile {
         match self {
             ServerFile::Properties => "server.properties",
             ServerFile::JvmArgs => "user_jvm_args.txt",
+            ServerFile::RunScript => "run.bat",
         }
     }
+}
+
+/// A machine reachable over SSH — a friend's PC on the Hamachi network, in
+/// practice — whose server files this app can edit.
+///
+/// Holds no credentials. Authentication is the system `ssh` client's business:
+/// it uses the keys and `known_hosts` already on this machine, which is also
+/// why this struct can be written to disk as plain JSON without care.
+/// How this app reaches a remote machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Transport {
+    /// The other machine runs this app with remote access switched on. Nothing
+    /// to install on their side, and a pairing code instead of a key.
+    #[default]
+    App,
+    /// The system `ssh` client. For a machine that does not run this app, or
+    /// one where you already have key access.
+    Ssh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteHost {
+    /// Stable id, assigned on first save.
+    pub id: String,
+    /// What to call it in the list — "小明的電腦", not an IP.
+    pub label: String,
+    /// Hostname or address. A Hamachi address looks like `25.x.x.x`.
+    pub host: String,
+    #[serde(default)]
+    pub transport: Transport,
+    /// The pairing code shown by the other machine's app. `App` transport only.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// `Ssh` transport only.
+    #[serde(default)]
+    pub user: String,
+    pub port: u16,
+    /// Private key to use. `None` lets ssh pick from its own defaults.
+    pub key_path: Option<PathBuf>,
+    /// The server folder on that machine, e.g. `C:/servers/smp`. `Ssh`
+    /// transport only — over `App` the other side names its own servers.
+    #[serde(default)]
+    pub dir: String,
 }
 
 /// The subset of `server.properties` the settings modal exposes.
@@ -418,6 +468,10 @@ pub enum CoreEvent {
     ServersChanged,
     /// Download progress, throttled.
     Download(DownloadProgress),
+    /// Somebody connected to this machine's remote-access listener. Shown as a
+    /// running list: a service that writes files is one the user should be able
+    /// to watch without going looking for a log file.
+    AgentActivity { line: String },
     /// Something failed outside a command's return path (a background install,
     /// a crashed reader task). Commands report their own errors as `Err`.
     Error {

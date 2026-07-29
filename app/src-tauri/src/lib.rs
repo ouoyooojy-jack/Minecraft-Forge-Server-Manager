@@ -4,11 +4,13 @@
 //! module, and translate the result. Anything worth testing lives in a module
 //! that does not import `tauri`, so it can be tested without a window.
 
+mod agent;
 mod download;
 mod forge;
 mod java;
 mod logbuf;
 mod registry;
+mod remote;
 mod supervisor;
 #[cfg(test)]
 mod testutil;
@@ -20,10 +22,12 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use agent::{Agent, AgentSettings};
 use download::Downloader;
 use forge::Forge;
 use java::Java;
 use registry::Registry;
+use remote::Remotes;
 use supervisor::Supervisor;
 use types::{
     CoreError, CoreEvent, CoreResult, DownloadId, DownloadKind, ForgeVersionGroup, LogLine,
@@ -31,13 +35,20 @@ use types::{
 };
 
 pub struct AppState {
-    registry: Registry,
+    registry: Arc<Registry>,
     /// Owns every running process and the console history that outlives it.
     supervisor: Supervisor,
     downloader: Downloader,
     forge: Forge,
     /// Locates a JRE, and unpacks one when the machine has none.
     java: Java,
+    /// Other people's machines.
+    remotes: Remotes,
+    /// This machine's own listener, when the user has switched it on. `None`
+    /// means nothing is bound and nothing is answering.
+    running_agent: std::sync::Mutex<Option<Agent>>,
+    /// Where `agent.json` and `remotes.json` live.
+    data_dir: PathBuf,
     /// Where installer jars and JREs land. Shared across servers, so the same
     /// Forge version is fetched once no matter how many servers use it.
     downloads_dir: PathBuf,
@@ -312,6 +323,203 @@ fn reject_while_running(state: &AppState, id: &ServerId) -> CoreResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Commands — remote hosts
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_remotes(state: State<'_, AppState>) -> Vec<types::RemoteHost> {
+    state.remotes.list()
+}
+
+/// Add or update one. An empty id means new; the assigned entry comes back.
+#[tauri::command]
+fn save_remote(
+    state: State<'_, AppState>,
+    host: types::RemoteHost,
+) -> CoreResult<types::RemoteHost> {
+    state.remotes.save(host)
+}
+
+#[tauri::command]
+fn delete_remote(state: State<'_, AppState>, id: String) -> CoreResult<()> {
+    state.remotes.delete(&id)
+}
+
+/// Connect and report what is on the other side.
+///
+/// Not a bare "ok": a login that succeeds against the wrong folder, or a
+/// pairing code that reaches somebody else's machine, both look like success
+/// until an edit goes somewhere unexpected.
+#[tauri::command]
+async fn test_remote(state: State<'_, AppState>, id: String) -> CoreResult<String> {
+    let host = state.remotes.get(&id)?;
+    match host.transport {
+        types::Transport::Ssh => remote::test(&host).await,
+        types::Transport::App => {
+            let servers = remote::agent_servers(&host).await?;
+            Ok(match servers.len() {
+                0 => "連上了，但對方還沒有任何伺服器。".into(),
+                n => format!(
+                    "連上了，對方有 {n} 座伺服器：{}",
+                    servers
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ),
+            })
+        }
+    }
+}
+
+/// The servers on that machine. `App` transport only — over SSH this app is
+/// pointed at one folder and has no list to ask for.
+#[tauri::command]
+async fn remote_servers(
+    state: State<'_, AppState>,
+    id: String,
+) -> CoreResult<Vec<agent::RemoteServer>> {
+    remote::agent_servers(&state.remotes.get(&id)?).await
+}
+
+/// The host key fingerprint, for the user to read before trusting it. SSH only.
+#[tauri::command]
+async fn remote_fingerprint(state: State<'_, AppState>, id: String) -> CoreResult<String> {
+    remote::fingerprint(&state.remotes.get(&id)?).await
+}
+
+/// Record the host key. Only after the user has seen the fingerprint.
+#[tauri::command]
+async fn trust_remote(state: State<'_, AppState>, id: String) -> CoreResult<()> {
+    remote::trust(&state.remotes.get(&id)?).await
+}
+
+/// `server` names which server on the far side; it is required for `App` and
+/// ignored for `Ssh`, where the host entry already points at one folder.
+#[tauri::command]
+async fn read_remote_file(
+    state: State<'_, AppState>,
+    id: String,
+    server: Option<String>,
+    file: types::ServerFile,
+) -> CoreResult<String> {
+    let host = state.remotes.get(&id)?;
+    match host.transport {
+        types::Transport::Ssh => remote::read(&host, file).await,
+        types::Transport::App => remote::agent_read(&host, require_server(server)?, file).await,
+    }
+}
+
+#[tauri::command]
+async fn write_remote_file(
+    state: State<'_, AppState>,
+    id: String,
+    server: Option<String>,
+    file: types::ServerFile,
+    text: String,
+) -> CoreResult<()> {
+    let host = state.remotes.get(&id)?;
+    match host.transport {
+        types::Transport::Ssh => remote::write_file(&host, file, &text).await,
+        types::Transport::App => {
+            remote::agent_write(&host, require_server(server)?, file, text).await
+        }
+    }
+}
+
+fn require_server(server: Option<String>) -> CoreResult<String> {
+    server
+        .filter(|s| !s.is_empty())
+        .ok_or(CoreError::Precondition {
+            message: "請先選擇對方的伺服器。".into(),
+        })
+}
+
+// ─────────────────────────────────────────────────────────────
+// Commands — this machine's listener
+// ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_agent_settings(state: State<'_, AppState>) -> AgentSettings {
+    agent::load_settings(&state.data_dir)
+}
+
+/// Switch the listener on or off, or move it to another port.
+///
+/// Binding is done here rather than on the next launch so the switch means what
+/// it says, and a port already in use fails visibly instead of leaving the UI
+/// claiming to be listening.
+#[tauri::command]
+async fn set_agent_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+    port: u16,
+) -> CoreResult<AgentSettings> {
+    let mut settings = agent::load_settings(&state.data_dir);
+    settings.enabled = enabled;
+    settings.port = port;
+
+    // Always stop first: a port change is a stop and a start.
+    if let Some(previous) = state
+        .running_agent
+        .lock()
+        .expect("agent mutex poisoned")
+        .take()
+    {
+        previous.stop();
+    }
+    if enabled {
+        let started = start_agent(&app, &state, &settings).await?;
+        *state.running_agent.lock().expect("agent mutex poisoned") = Some(started);
+    }
+
+    agent::save_settings(&state.data_dir, &settings)?;
+    Ok(settings)
+}
+
+/// New pairing code. Everyone holding the old one stops being able to connect,
+/// which is the point — it is the only way to take access back.
+#[tauri::command]
+async fn regenerate_agent_token(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CoreResult<AgentSettings> {
+    let mut settings = agent::load_settings(&state.data_dir);
+    settings.token = agent::new_token();
+    agent::save_settings(&state.data_dir, &settings)?;
+
+    // The running listener holds the old code; restart it on the new one.
+    if settings.enabled {
+        if let Some(previous) = state
+            .running_agent
+            .lock()
+            .expect("agent mutex poisoned")
+            .take()
+        {
+            previous.stop();
+        }
+        let started = start_agent(&app, &state, &settings).await?;
+        *state.running_agent.lock().expect("agent mutex poisoned") = Some(started);
+    }
+    Ok(settings)
+}
+
+async fn start_agent(
+    app: &AppHandle,
+    state: &AppState,
+    settings: &AgentSettings,
+) -> CoreResult<Agent> {
+    let handle = app.clone();
+    Agent::start(
+        Arc::clone(&state.registry),
+        settings.clone(),
+        Arc::new(move |line| emit(&handle, CoreEvent::AgentActivity { line })),
+    )
+    .await
+}
+
+// ─────────────────────────────────────────────────────────────
 // Commands — java
 // ─────────────────────────────────────────────────────────────
 
@@ -495,7 +703,7 @@ pub fn run() {
             // Servers live under the app data dir, not next to the executable:
             // an app installed into Program Files cannot write beside itself.
             let data_dir = app.path().app_data_dir()?;
-            let registry = Registry::new(data_dir.join("servers"))?;
+            let registry = Arc::new(Registry::new(data_dir.join("servers"))?);
 
             // The supervisor pushes events from background tasks, so it gets an
             // owned handle rather than borrowing the one `setup` was given.
@@ -515,7 +723,34 @@ pub fn run() {
                 downloader,
                 forge: Forge::new()?,
                 java: Java::new(data_dir.join("java"))?,
+                remotes: Remotes::new(&data_dir)?,
+                running_agent: std::sync::Mutex::new(None),
+                data_dir: data_dir.clone(),
                 downloads_dir,
+            });
+
+            // Remote access, if the user left it switched on. Started here so
+            // it rides along with the app: the machine running the server is
+            // the machine that has to be reachable, and it is already open.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                let settings = agent::load_settings(&state.data_dir);
+                if !settings.enabled {
+                    return;
+                }
+                match start_agent(&handle, &state, &settings).await {
+                    Ok(started) => {
+                        *state.running_agent.lock().expect("agent mutex poisoned") = Some(started);
+                        emit(
+                            &handle,
+                            CoreEvent::AgentActivity {
+                                line: format!("遠端存取已啟動，連接埠 {}", settings.port),
+                            },
+                        );
+                    }
+                    Err(e) => emit(&handle, CoreEvent::Error { id: None, error: e }),
+                }
             });
 
             #[cfg(target_os = "windows")]
@@ -542,6 +777,18 @@ pub fn run() {
             list_mods,
             add_mods,
             delete_mod,
+            list_remotes,
+            save_remote,
+            delete_remote,
+            test_remote,
+            remote_servers,
+            get_agent_settings,
+            set_agent_settings,
+            regenerate_agent_token,
+            remote_fingerprint,
+            trust_remote,
+            read_remote_file,
+            write_remote_file,
             install_java,
             console_since,
             read_server_file,

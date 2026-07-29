@@ -1,0 +1,71 @@
+# Build, sign, and publish a release.
+#
+# Triggered by pushing a tag: `git tag v0.1.1 && git push origin v0.1.1`.
+# The version in the tag has to match `version` in app/src-tauri/tauri.conf.json
+# — that is the number the updater compares against, and a mismatch means
+# clients either never see the release or download one that reports the version
+# they already have.
+#
+# Produces, on a draft release:
+#   Mc Server Manager_<version>_x64-setup.exe      the installer
+#   Mc Server Manager_<version>_x64-setup.exe.sig  its signature
+#   latest.json                                    what the updater reads
+#
+# The release is a draft: publish it by hand once you have run the installer
+# yourself. Publishing is what makes every client show the mandatory prompt.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets you build the artifacts without tagging, to check the pipeline.
+  workflow_dispatch:
+
+jobs:
+  release:
+    # Windows only — the app is Windows only.
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on the lock file: a build that changes no dependency reuses the
+      # whole compiled tree, which is most of the four minutes.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - run: npm ci
+        working-directory: app
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Generated locally with `npm run tauri signer generate`. The private
+          # key never leaves your machine and this secret; the public half sits
+          # in tauri.conf.json and is what clients verify against.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ./app
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseBody: ${{ github.event.head_commit.message }}
+          releaseDraft: true
+          # Writes latest.json next to the installer. The endpoint in
+          # tauri.conf.json points at `releases/latest/download/latest.json`,
+          # so this file is the whole update feed.
+          includeUpdaterJson: true

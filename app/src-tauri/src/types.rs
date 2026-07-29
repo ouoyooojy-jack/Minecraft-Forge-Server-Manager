@@ -359,6 +359,16 @@ pub struct DownloadedFile {
     pub bytes: u64,
 }
 
+/// One jar in a server's `mods/` folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModFile {
+    /// File name, which is also the handle for deleting it — the core resolves
+    /// it against the server's own `mods/` and nothing else.
+    pub name: String,
+    pub bytes: u64,
+}
+
 // ─────────────────────────────────────────────────────────────
 // Java runtimes
 // ─────────────────────────────────────────────────────────────

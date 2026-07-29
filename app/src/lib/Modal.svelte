@@ -18,12 +18,17 @@
     open = $bindable(false),
     title,
     width = 480,
+    dismissible = true,
     children,
     footer,
   }: {
     open: boolean;
     title: string;
     width?: number;
+    /** Off for a modal the user has to act on: no close button, no backdrop
+     *  dismiss, and Escape does nothing. The mandatory update prompt is the
+     *  only one — everything else must stay closable. */
+    dismissible?: boolean;
     children: Snippet;
     footer?: Snippet;
   } = $props();
@@ -41,18 +46,24 @@
   bind:this={dialog}
   style="--modal-width: {width}px"
   onclose={() => (open = false)}
+  oncancel={(e) => {
+    // <dialog> closes on Escape by itself; this is the only way to refuse.
+    if (!dismissible) e.preventDefault();
+  }}
   onmousedown={(e) => {
     // Backdrop clicks land on the dialog element itself; anything inside is a
     // descendant. Using mousedown means a drag that starts inside and ends on
     // the backdrop does not dismiss the modal.
-    if (e.target === dialog) open = false;
+    if (dismissible && e.target === dialog) open = false;
   }}
 >
   <header>
     <h2>{title}</h2>
-    <button class="close" onclick={() => (open = false)} aria-label="關閉">
-      <Icon name="close" size={16} />
-    </button>
+    {#if dismissible}
+      <button class="close" onclick={() => (open = false)} aria-label="關閉">
+        <Icon name="close" size={16} />
+      </button>
+    {/if}
   </header>
 
   <div class="body">

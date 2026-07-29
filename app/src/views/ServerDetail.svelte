@@ -11,17 +11,22 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { open } from "@tauri-apps/plugin-dialog";
 
   import Button from "../lib/Button.svelte";
   import Icon from "../lib/Icon.svelte";
   import JavaPrompt from "../lib/JavaPrompt.svelte";
   import Modal from "../lib/Modal.svelte";
-  import { formatMemory, formatUptime } from "../lib/format";
+  import { formatBytes, formatMemory, formatUptime } from "../lib/format";
+  import { isActive, primaryAction, STATE_LABEL } from "../lib/serverState";
   import {
+    addMods,
+    deleteMod,
     deleteServer,
     consoleSince,
     getServerConfig,
     getServerProperties,
+    listMods,
     listServers,
     onCoreEvent,
     openServerFolder,
@@ -39,24 +44,15 @@
     type Difficulty,
     type Gamemode,
     type LogLine,
+    type ModFile,
     type ServerConfig,
     type ServerFile,
     type ServerId,
     type ServerProperties,
-    type ServerState,
     type ServerSummary,
   } from "../lib/types";
 
   let { id, back }: { id: ServerId; back: () => void } = $props();
-
-  const STATE_LABEL: Record<ServerState["kind"], string> = {
-    stopped: "已停止",
-    installing: "安裝中",
-    starting: "啟動中",
-    online: "執行中",
-    stopping: "停止中",
-    crashed: "已當機",
-  };
 
   const GAMEMODES: [Gamemode, string][] = [
     ["survival", "生存"],
@@ -96,11 +92,11 @@
   const visibleLines = $derived(lines.filter((l) => l.seq >= hideBefore));
 
   const online = $derived(server?.state.kind === "online");
-  const isUp = $derived(
-    server !== null &&
-      server.state.kind !== "stopped" &&
-      server.state.kind !== "crashed",
-  );
+  const isUp = $derived(server !== null && isActive(server.state));
+  /** What the one lifecycle button says and does right now. A server we have
+   *  not loaded yet reads as stopped, so the button is inert rather than absent
+   *  — the header must not change height when the fetch lands. */
+  const action = $derived(primaryAction(server?.state ?? { kind: "stopped" }));
 
   /** Seconds, seeded from the core on every refresh and ticked locally in
    *  between so the clock counts smoothly without polling once a second. */
@@ -126,6 +122,9 @@
   let fileWhich = $state<ServerFile>("properties");
   let fileText = $state("");
   let fileBusy = $state(false);
+
+  let mods = $state<ModFile[]>([]);
+  let modsBusy = $state(false);
 
   let confirmingDelete = $state(false);
 
@@ -188,6 +187,35 @@
       config = await getServerConfig(id);
       properties = await getServerProperties(id);
       name = config.name;
+    });
+
+  const loadMods = () =>
+    run(async () => {
+      mods = await listMods(id);
+    });
+
+  /** Pick jars and copy them in. Multi-select: a modpack is never one file. */
+  async function addModFiles() {
+    const picked = await open({
+      multiple: true,
+      filters: [{ name: "Forge 模組", extensions: ["jar"] }],
+      title: "選擇模組",
+    });
+    const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (!paths.length) return;
+
+    modsBusy = true;
+    await run(async () => {
+      await addMods(id, paths);
+      mods = await listMods(id);
+    });
+    modsBusy = false;
+  }
+
+  const removeMod = (name: string) =>
+    run(async () => {
+      await deleteMod(id, name);
+      mods = await listMods(id);
     });
 
   /** Full refetch — used on mount and whenever a seq gap appears. */
@@ -263,11 +291,15 @@
   onMount(() => {
     refresh();
     loadSettings();
+    loadMods();
     reloadConsole();
 
     const unlisten = onCoreEvent((event) => {
       if (event.type === "serversChanged") refresh();
       if (event.type === "serverState" && event.id === id) {
+        // Straight from the event; the refetch below only adds the live
+        // counters, and the header must not lag behind on its own state.
+        if (server) server = { ...server, state: event.state, light: event.light };
         refresh();
         // Only a clean stop leads back to a start. A crash means the restart
         // already failed, and relaunching would loop on the same fault.
@@ -336,18 +368,18 @@
     </div>
 
     <div class="actions">
-      {#if isUp}
-        <Button danger onclick={() => run(() => stopServer(id))}>
-          <Icon name="square" size={14} />
-          停止
-        </Button>
-      {:else}
-        <Button variant="primary" onclick={start}>
-          <Icon name="play" size={14} />
-          啟動
-        </Button>
-      {/if}
-      <Button disabled={!isUp || restarting} onclick={restart}>
+      <Button
+        variant={action.primary ? "primary" : "secondary"}
+        danger={action.run === "stop"}
+        disabled={action.disabled || restarting}
+        onclick={() => (action.run === "start" ? start() : run(() => stopServer(id)))}
+      >
+        <Icon name={action.icon} size={14} />
+        {action.label}
+      </Button>
+      <!-- Restarting a server that has not finished booting would send `stop`
+           to something not yet listening for it. -->
+      <Button disabled={!online || restarting} onclick={restart}>
         <Icon name="rotate-cw" size={14} />
         {restarting ? "重啟中…" : "重啟"}
       </Button>
@@ -529,6 +561,45 @@
           </div>
         </section>
       </div>
+
+      <section class="card mods">
+        <div class="mods-head">
+          <h2>模組</h2>
+          <span class="mods-count tabular">{mods.length}</span>
+          <span class="mods-line"></span>
+          <Button onclick={addModFiles} disabled={isUp || modsBusy}>
+            <Icon name="plus" size={15} />
+            新增模組
+          </Button>
+        </div>
+
+        {#if isUp}
+          <p class="mods-note">伺服器執行中。模組只在啟動時載入，要停止後才能變更。</p>
+        {/if}
+
+        {#if mods.length === 0}
+          <p class="mods-empty">
+            還沒有模組。加進來的 jar 會複製到伺服器的 <code>mods/</code> 資料夾。
+          </p>
+        {:else}
+          <ul class="mod-list">
+            {#each mods as mod (mod.name)}
+              <li>
+                <span class="mod-name" title={mod.name}>{mod.name}</span>
+                <span class="mod-size tabular">{formatBytes(mod.bytes)}</span>
+                <button
+                  class="mod-remove"
+                  onclick={() => removeMod(mod.name)}
+                  disabled={isUp}
+                  aria-label="移除 {mod.name}"
+                >
+                  <Icon name="trash" size={15} />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
 
       <section class="danger">
         <span>
@@ -1074,6 +1145,93 @@
 
   .toggle input:checked::after {
     transform: translateX(17px);
+  }
+
+  /* ── mods ──────────────────────────────────────────── */
+
+  .mods-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mods-count {
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  /* Pushes the button to the right and draws the rule the header sits on. */
+  .mods-line {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .mods-note,
+  .mods-empty {
+    color: var(--muted);
+    font-size: var(--font-small);
+    line-height: 1.6;
+  }
+
+  .mods-empty code {
+    font-family: var(--font-mono);
+    font-size: var(--font-tiny);
+  }
+
+  .mod-list {
+    display: flex;
+    flex-direction: column;
+    list-style: none;
+    /* A long mod list must not push the save row off the page. */
+    max-height: 260px;
+    overflow: auto;
+  }
+
+  .mod-list li {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 40px;
+    padding: 4px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .mod-list li:first-child {
+    border-top: none;
+  }
+
+  .mod-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--font-small);
+  }
+
+  .mod-size {
+    color: var(--faint);
+    font-size: var(--font-small);
+  }
+
+  .mod-remove {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: var(--muted);
+  }
+
+  .mod-remove:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    color: var(--error);
+  }
+
+  .mod-remove:disabled {
+    opacity: 0.4;
   }
 
   .danger {

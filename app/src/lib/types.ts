@@ -125,6 +125,13 @@ export function downloadPercent(p: DownloadProgress): number | null {
   return p.total && p.total > 0 ? (p.received / p.total) * 100 : null;
 }
 
+/** One jar in a server's `mods/` folder. */
+export interface ModFile {
+  /** File name — also the handle for deleting it. */
+  name: string;
+  bytes: number;
+}
+
 /** An installer jar in the downloads folder. */
 export interface DownloadedFile {
   path: string;

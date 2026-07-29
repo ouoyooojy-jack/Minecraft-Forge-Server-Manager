@@ -20,6 +20,9 @@ export default defineConfig({
   build: {
     // WebView2 tracks Edge, so there is no old-browser tail to support.
     target: "esnext",
-    sourcemap: true,
+    // Off: Tauri embeds everything under dist/ into the executable, and the
+    // map is 800 KB of it — larger than the app it describes. The dev server
+    // serves its own sourcemaps, which is where debugging actually happens.
+    sourcemap: false,
   },
 });

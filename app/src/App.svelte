@@ -13,6 +13,7 @@
   import Home from "./views/Home.svelte";
   import ServerDetail from "./views/ServerDetail.svelte";
   import Settings from "./views/Settings.svelte";
+  import UpdatePrompt from "./lib/UpdatePrompt.svelte";
   import type { ServerId } from "./lib/types";
 
   let selected = $state(0);
@@ -21,6 +22,10 @@
    *  page is a back button, not a fourth destination. */
   let detail = $state<ServerId | null>(null);
 </script>
+
+<!-- Outside the window frame: it is modal over everything, including the
+     title bar, and it must not depend on which page is showing. -->
+<UpdatePrompt />
 
 <div class="window">
   <TitleBar />

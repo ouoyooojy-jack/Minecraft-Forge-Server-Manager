@@ -8,8 +8,12 @@ rust-version = "1.77"
 [lib]
 # The binary is a thin shim over this; keeping the logic in a lib lets the
 # core modules be unit-tested without launching a window.
+#
+# rlib only: staticlib and cdylib exist for the mobile targets, and building
+# three copies of the crate to ship one Windows exe is time and disk for
+# nothing. Add them back the day this targets Android or iOS.
 name = "mc_server_manager_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -18,6 +22,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 # Native folder picker for "import an existing server".
 tauri-plugin-dialog = "2"
+# In-app updates. default-features off drops the bundled rustls: the transfer
+# goes over the system TLS stack, same as every other request this app makes,
+# rather than shipping a second one.
+tauri-plugin-updater = { version = "2", default-features = false, features = [
+    "native-tls",
+    "zip",
+] }
+# Only for the relaunch after an update installs.
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -29,23 +42,25 @@ tokio = { version = "1", features = [
     "sync",
     "time",
     "fs",
-    "net",
 ] }
 
 # default-features off drops the blocking client, cookies, gzip, and charset
 # machinery none of this needs. native-tls means schannel on Windows — the
 # system's TLS, rather than bundling rustls plus a root store into the exe.
-reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 
 # Unpacking the JRE archive Adoptium ships. deflate only — no bzip2/zstd/aes,
 # none of which a JDK zip uses, all of which are weight in the exe.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
+# Only the tests need sockets — they serve downloads over loopback. Kept out of
+# the release build's feature set, where nothing opens one.
+tokio = { version = "1", features = ["net"] }
 
 [profile.release]
 # Smallest binary that still panics usefully. Tauri's own recommendation.

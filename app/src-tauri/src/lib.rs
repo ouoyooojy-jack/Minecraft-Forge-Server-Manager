@@ -262,16 +262,6 @@ fn open_server_folder(state: State<'_, AppState>, id: ServerId) -> CoreResult<()
     Ok(())
 }
 
-#[tauri::command]
-fn get_eula(state: State<'_, AppState>, id: ServerId) -> bool {
-    state.registry.eula_accepted(&id)
-}
-
-#[tauri::command]
-fn set_eula(state: State<'_, AppState>, id: ServerId, accepted: bool) -> CoreResult<()> {
-    state.registry.set_eula(&id, accepted)
-}
-
 // ─────────────────────────────────────────────────────────────
 // Commands — console
 // ─────────────────────────────────────────────────────────────
@@ -283,11 +273,42 @@ fn console_since(state: State<'_, AppState>, id: ServerId, after_seq: u64) -> Ve
     state.supervisor.console_since(&id, after_seq)
 }
 
-/// The oldest sequence still retained. A UI holding something older than this
-/// knows the ring buffer evicted lines and can say so.
+// ─────────────────────────────────────────────────────────────
+// Commands — mods
+// ─────────────────────────────────────────────────────────────
+
 #[tauri::command]
-fn console_oldest_seq(state: State<'_, AppState>, id: ServerId) -> Option<u64> {
-    state.supervisor.console_oldest_seq(&id)
+fn list_mods(state: State<'_, AppState>, id: ServerId) -> CoreResult<Vec<types::ModFile>> {
+    state.registry.list_mods(&id)
+}
+
+/// Copy jars into the server's `mods/`.
+///
+/// Refused while the server is running: Forge reads the folder once at startup,
+/// so nothing added now would load, and Windows holds the jars it has open —
+/// a delete would fail outright.
+#[tauri::command]
+fn add_mods(state: State<'_, AppState>, id: ServerId, paths: Vec<PathBuf>) -> CoreResult<()> {
+    reject_while_running(&state, &id)?;
+    for path in &paths {
+        state.registry.add_mod(&id, path)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_mod(state: State<'_, AppState>, id: ServerId, name: String) -> CoreResult<()> {
+    reject_while_running(&state, &id)?;
+    state.registry.delete_mod(&id, &name)
+}
+
+fn reject_while_running(state: &AppState, id: &ServerId) -> CoreResult<()> {
+    if state.supervisor.is_active(id) {
+        return Err(CoreError::Precondition {
+            message: "伺服器執行中，模組要在停止時才能變更。".into(),
+        });
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -374,13 +395,6 @@ fn stop_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
     state.supervisor.stop(&id)
 }
 
-/// Immediate termination, for a server that has stopped responding. Skips the
-/// save — the UI should make that consequence clear before calling.
-#[tauri::command]
-fn kill_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
-    state.supervisor.kill(&id)
-}
-
 #[tauri::command]
 fn send_console_command(
     state: State<'_, AppState>,
@@ -393,30 +407,6 @@ fn send_console_command(
 // ─────────────────────────────────────────────────────────────
 // Commands — downloads
 // ─────────────────────────────────────────────────────────────
-
-/// Begin fetching something, returning its id straight away.
-///
-/// The transfer reports through `CoreEvent::Download`, so the id is what the
-/// cancel button binds to — waiting for the command to resolve would mean the
-/// download could not be cancelled until it had already finished.
-#[tauri::command]
-fn start_download(
-    state: State<'_, AppState>,
-    what: DownloadKind,
-    url: String,
-    filename: String,
-) -> CoreResult<DownloadId> {
-    // The UI names the file; it must not be able to name a path. A version
-    // string echoed from a remote metadata document reaches this argument, and
-    // `..\..\` in it would otherwise write anywhere on disk.
-    let filename = Path::new(&filename)
-        .file_name()
-        .ok_or_else(|| CoreError::Config {
-            message: "invalid download filename".into(),
-        })?;
-    let dest = state.downloads_dir.join(filename);
-    state.downloader.start(what, url, dest)
-}
 
 #[tauri::command]
 fn cancel_download(state: State<'_, AppState>, id: DownloadId) {
@@ -489,25 +479,6 @@ fn delete_download(state: State<'_, AppState>, path: PathBuf) -> CoreResult<()> 
     Ok(())
 }
 
-/// Run a Forge installer into a server folder.
-///
-/// Does not accept the EULA as a side effect — that is `set_eula`, driven by
-/// the checkbox the user actually ticked.
-#[tauri::command]
-async fn install_forge(
-    state: State<'_, AppState>,
-    id: ServerId,
-    installer: PathBuf,
-) -> CoreResult<()> {
-    let config = state.registry.load_config(&id)?;
-    let config = resolve_java(&state, &config, installer_mc_version(&installer).as_deref())?;
-    let dir = state.registry.dir_of(&id);
-    state
-        .supervisor
-        .install(&id, &dir, &installer, &config)
-        .await
-}
-
 // ─────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────
@@ -516,6 +487,10 @@ async fn install_forge(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // The update flow is driven entirely from the UI: check on launch,
+        // then a modal the user cannot dismiss until they take the update.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Servers live under the app data dir, not next to the executable:
             // an app installed into Program Files cannot write beside itself.
@@ -564,20 +539,17 @@ pub fn run() {
             save_server_config,
             get_server_properties,
             save_server_properties,
-            get_eula,
-            set_eula,
+            list_mods,
+            add_mods,
+            delete_mod,
             install_java,
             console_since,
-            console_oldest_seq,
             read_server_file,
             write_server_file,
             open_server_folder,
             start_server,
             stop_server,
-            kill_server,
             send_console_command,
-            install_forge,
-            start_download,
             cancel_download,
             list_downloads,
             delete_download,

@@ -17,13 +17,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::types::{
-    is_installed, CoreError, CoreResult, Difficulty, Gamemode, RawProperties, ServerConfig,
-    ServerFile, ServerId, ServerProperties, ServerState, ServerSummary,
+    is_installed, CoreError, CoreResult, Difficulty, Gamemode, ModFile, RawProperties,
+    ServerConfig, ServerFile, ServerId, ServerProperties, ServerState, ServerSummary,
 };
 
 const MANAGER_FILE: &str = "manager.json";
 const PROPERTIES_FILE: &str = "server.properties";
 const EULA_FILE: &str = "eula.txt";
+const MODS_DIR: &str = "mods";
 
 pub struct Registry {
     root: PathBuf,
@@ -35,12 +36,6 @@ impl Registry {
         let root = root.into();
         fs::create_dir_all(&root)?;
         Ok(Self { root })
-    }
-
-    /// Used by the "open server folder" action, once the UI has one.
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Where *our* metadata lives. Always inside the managed folder, even for
@@ -337,6 +332,70 @@ impl Registry {
         Ok(())
     }
 
+    // ── mods/ ───────────────────────────────────────────────
+
+    /// Jars in the server's `mods/` folder, alphabetical.
+    ///
+    /// A folder that has never had Forge run in it has no `mods/` yet; that
+    /// reads as empty rather than failing, so the panel can offer to add one.
+    pub fn list_mods(&self, id: &ServerId) -> CoreResult<Vec<ModFile>> {
+        let dir = self.dir_of(id).join(MODS_DIR);
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<ModFile> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_owned();
+                if !name.to_lowercase().ends_with(".jar") {
+                    return None;
+                }
+                Some(ModFile {
+                    bytes: e.metadata().ok()?.len(),
+                    name,
+                })
+            })
+            .collect();
+        out.sort_by_key(|m| m.name.to_lowercase());
+        Ok(out)
+    }
+
+    /// Copy a jar in, overwriting a file of the same name.
+    ///
+    /// Overwriting is what updating a mod looks like from the user's side —
+    /// they pick the newer jar of the same name and expect it to replace the
+    /// old one, not to sit beside it and get loaded twice.
+    pub fn add_mod(&self, id: &ServerId, source: &Path) -> CoreResult<()> {
+        if source
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            != Some("jar".into())
+        {
+            return Err(CoreError::Precondition {
+                message: "模組必須是 .jar 檔案。".into(),
+            });
+        }
+        let name =
+            source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| CoreError::Precondition {
+                    message: "檔名無法辨識。".into(),
+                })?;
+
+        let dir = self.dir_of(id).join(MODS_DIR);
+        fs::create_dir_all(&dir)?;
+        fs::copy(source, dir.join(name))?;
+        Ok(())
+    }
+
+    pub fn delete_mod(&self, id: &ServerId, name: &str) -> CoreResult<()> {
+        let dir = self.dir_of(id).join(MODS_DIR);
+        fs::remove_file(dir.join(safe_mod_name(name)?))?;
+        Ok(())
+    }
+
     // ── eula.txt ────────────────────────────────────────────
 
     pub fn eula_accepted(&self, id: &ServerId) -> bool {
@@ -419,6 +478,24 @@ fn merge_properties(existing: &str, updates: &[(&str, String)]) -> String {
 
 /// Heap size out of a `user_jvm_args.txt` body, in MB. `None` when the file
 /// names no `-Xmx` at all, which leaves the stored config as the authority.
+/// A mod file name that can only ever name a file inside `mods/`.
+///
+/// The name crosses the IPC boundary, so it is checked here rather than
+/// trusted: a `..` or a separator in it would otherwise reach any file on disk
+/// through `remove_file`.
+fn safe_mod_name(name: &str) -> CoreResult<&str> {
+    let rejected = name.is_empty()
+        || name.contains(['/', '\\', ':'])
+        || name.contains("..")
+        || !name.to_lowercase().ends_with(".jar");
+    if rejected {
+        return Err(CoreError::Precondition {
+            message: "模組檔名無效。".into(),
+        });
+    }
+    Ok(name)
+}
+
 fn parse_xmx_mb(text: &str) -> Option<u32> {
     text.lines()
         // Forge ships this file with its defaults commented out; a commented
@@ -521,6 +598,42 @@ mod tests {
             .read_file(&id, ServerFile::JvmArgs)
             .unwrap()
             .contains("-XX:+UseG1GC"));
+    }
+
+    #[test]
+    fn mods_round_trip_and_a_crafted_name_cannot_escape_the_folder() {
+        let (tmp, reg) = temp_registry();
+        let id = reg.create("Server").unwrap();
+        assert!(reg.list_mods(&id).unwrap().is_empty(), "no mods/ yet");
+
+        let jar = tmp.path().join("JEI-1.20.1.jar");
+        std::fs::write(&jar, b"pretend jar").unwrap();
+        reg.add_mod(&id, &jar).unwrap();
+
+        let listed = reg.list_mods(&id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "JEI-1.20.1.jar");
+        assert_eq!(listed[0].bytes, 11);
+
+        // Anything that is not a jar, and any name that could point outside
+        // mods/, is refused rather than resolved.
+        let txt = tmp.path().join("notes.txt");
+        std::fs::write(&txt, b"").unwrap();
+        assert!(reg.add_mod(&id, &txt).is_err());
+        for crafted in [
+            "../../manager.json",
+            r"..\eula.txt",
+            "a/b.jar",
+            "x.jar/../y",
+        ] {
+            assert!(
+                reg.delete_mod(&id, crafted).is_err(),
+                "must refuse {crafted}"
+            );
+        }
+
+        reg.delete_mod(&id, "JEI-1.20.1.jar").unwrap();
+        assert!(reg.list_mods(&id).unwrap().is_empty());
     }
 
     #[test]

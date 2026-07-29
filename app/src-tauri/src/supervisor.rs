@@ -44,8 +44,6 @@ enum Cmd {
     Send(String),
     /// Graceful shutdown: `stop` over stdin, force-kill after `STOP_GRACE`.
     Stop,
-    /// Immediate termination. Skips the save.
-    Kill,
 }
 
 struct Running {
@@ -110,10 +108,6 @@ impl Supervisor {
 
     pub fn console_since(&self, id: &ServerId, after_seq: u64) -> Vec<LogLine> {
         self.with_log(id, |buf| buf.since(after_seq))
-    }
-
-    pub fn console_oldest_seq(&self, id: &ServerId) -> Option<u64> {
-        self.with_log(id, |buf| buf.oldest_seq())
     }
 
     pub fn forget(&self, id: &ServerId) {
@@ -204,10 +198,6 @@ impl Supervisor {
 
     pub fn stop(&self, id: &ServerId) -> CoreResult<()> {
         self.send_cmd(id, Cmd::Stop)
-    }
-
-    pub fn kill(&self, id: &ServerId) -> CoreResult<()> {
-        self.send_cmd(id, Cmd::Kill)
     }
 
     /// Send a console command. Only meaningful once the server is `Online`;
@@ -356,11 +346,6 @@ impl Supervisor {
                                 let _ = stdin.flush().await;
                                 kill_at = Some(Instant::now() + STOP_GRACE);
                             }
-                            Cmd::Kill => {
-                                stop_requested = true;
-                                set_state(&running, &emit, &id, ServerState::Stopping);
-                                force_kill(&mut child).await;
-                            }
                         }
                     }
 
@@ -465,21 +450,13 @@ struct Launch {
 fn launch_plan(dir: &Path, config: &ServerConfig) -> CoreResult<Launch> {
     let script = dir.join(if cfg!(windows) { "run.bat" } else { "run.sh" });
     if script.is_file() {
-        return Ok(if cfg!(windows) {
-            Launch {
-                program: "cmd".into(),
-                args: vec![
-                    "/c".into(),
-                    script.to_string_lossy().into_owned(),
-                    "nogui".into(),
-                ],
-            }
-        } else {
-            Launch {
-                program: script,
-                args: vec!["nogui".into()],
-            }
-        });
+        let text = std::fs::read_to_string(&script)?;
+        if let Some(args) = java_args_from_script(&text) {
+            return Ok(Launch {
+                program: java_binary(config),
+                args,
+            });
+        }
     }
 
     let jar = dir.join("server.jar");
@@ -499,6 +476,40 @@ fn launch_plan(dir: &Path, config: &ServerConfig) -> CoreResult<Launch> {
     Err(CoreError::Precondition {
         message: "找不到 run.bat 或 server.jar；請先安裝 Forge。".into(),
     })
+}
+
+/// Lift the real `java` invocation out of Forge's generated run script.
+///
+/// The script is not run as a script. It ends in `pause`, which with a piped
+/// stdin never returns: after the JVM exits, `cmd` sits there holding both
+/// pipes open, so the supervisor never sees EOF and the server appears to be
+/// stopping until the 90-second force-kill deadline fires. Newer scripts also
+/// open with a shim that re-checks Java and would run under whatever `cmd`
+/// resolves rather than the runtime we picked.
+///
+/// What the script is good for is the argument files, whose paths carry a
+/// version number we would otherwise have to reconstruct. So: find the line
+/// that references the args file, take its arguments, and launch the JVM
+/// directly. That makes the server our own direct child — exit detection and
+/// stdin both stop going through an intermediary.
+fn java_args_from_script(text: &str) -> Option<Vec<String>> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.starts_with("REM") && !l.starts_with('#') && l.contains("_args.txt"))?;
+
+    let mut args: Vec<String> = line
+        .split_whitespace()
+        .skip(1) // the `java` itself; the program comes from the config
+        .filter(|a| a.starts_with('@'))
+        .map(str::to_owned)
+        .collect();
+    if args.is_empty() {
+        return None;
+    }
+    // `%*` / `"$@"` is where the script forwards its own arguments.
+    args.push("nogui".into());
+    Some(args)
 }
 
 /// The child's `PATH` with the chosen runtime's `bin` directory in front, or
@@ -828,6 +839,51 @@ mod tests {
     }
 
     #[test]
+    fn the_run_script_yields_a_direct_java_invocation() {
+        // Forge 1.20.1's script, verbatim in shape.
+        let classic = "@echo off
+             REM Add custom JVM arguments to the user_jvm_args.txt
+             java @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.20.1-47.0.0/win_args.txt %*
+             pause
+";
+        assert_eq!(
+            java_args_from_script(classic),
+            Some(vec![
+                "@user_jvm_args.txt".into(),
+                "@libraries/net/minecraftforge/forge/1.20.1-47.0.0/win_args.txt".into(),
+                "nogui".into(),
+            ])
+        );
+
+        // 1.21's script runs a shim check first; that line must not be taken
+        // for the launch, and the REM lines mentioning the file must not either.
+        let modern = "@echo off
+             java -jar forge-1.21.11-61.1.14-shim.jar --onlyCheckJava
+             REM Add custom program arguments to the next line before the %*
+             java @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.21.11-61.1.14/win_args.txt %*
+             :exit
+             pause
+";
+        assert_eq!(
+            java_args_from_script(modern),
+            Some(vec![
+                "@user_jvm_args.txt".into(),
+                "@libraries/net/minecraftforge/forge/1.21.11-61.1.14/win_args.txt".into(),
+                "nogui".into(),
+            ])
+        );
+
+        assert_eq!(
+            java_args_from_script(
+                "@echo off
+pause
+"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn launch_prefers_the_run_script_over_the_jar() {
         let dir = tempfile::tempdir().unwrap();
         let config = ServerConfig::default();
@@ -840,9 +896,37 @@ mod tests {
         assert!(jar_plan.args.iter().any(|a| a.contains("server.jar")));
         assert!(jar_plan.args.iter().any(|a| a == "-Xmx2048M"));
 
-        std::fs::write(&script, b"").unwrap();
+        std::fs::write(
+            &script,
+            b"java @user_jvm_args.txt @libraries/x/win_args.txt %*
+pause
+",
+        )
+        .unwrap();
         let script_plan = launch_plan(dir.path(), &config).unwrap();
-        assert!(script_plan.args.iter().any(|a| a.contains("run.")));
+        assert_eq!(
+            script_plan.args,
+            vec![
+                "@user_jvm_args.txt".to_owned(),
+                "@libraries/x/win_args.txt".to_owned(),
+                "nogui".to_owned(),
+            ],
+            "the script supplies arguments, never the program"
+        );
+
+        // A script we cannot read falls through to the jar rather than failing.
+        std::fs::write(
+            &script,
+            b"@echo off
+pause
+",
+        )
+        .unwrap();
+        assert!(launch_plan(dir.path(), &config)
+            .unwrap()
+            .args
+            .iter()
+            .any(|a| a.contains("server.jar")));
     }
 
     #[test]
@@ -923,46 +1007,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kill_stops_a_long_running_process_and_is_not_a_crash() {
-        let (sink, mut rx) = collector();
-        let sup = Supervisor::new(sink);
-        let id = ServerId("t".into());
-
-        sup.spawn(id.clone(), long_running(), ServerState::Starting)
-            .await
-            .unwrap();
-
-        // Let the task register before commanding it.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        sup.kill(&id).unwrap();
-
-        let event = wait_for(&mut rx, |e| {
-            matches!(
-                e,
-                CoreEvent::ServerState {
-                    state: ServerState::Stopped | ServerState::Crashed { .. },
-                    ..
-                }
-            )
+    async fn force_kill_takes_down_the_whole_process_tree() {
+        // The reason this is not `child.kill()`: killing the shell leaves the
+        // process it launched alive, holding the world files. `taskkill /T`
+        // walks the tree.
+        let mut child = shell(if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > nul"
+        } else {
+            "sleep 30"
         })
-        .await
-        .expect("a killed process must reach a terminal state");
+        .spawn()
+        .unwrap();
 
-        assert!(
-            matches!(
-                event,
-                CoreEvent::ServerState {
-                    state: ServerState::Stopped,
-                    ..
-                }
-            ),
-            "a kill we asked for is not a crash"
-        );
-        assert!(!sup.is_active(&id));
-        // The entry stays behind to carry the final state; the card must still
-        // stop showing an uptime clock for it.
-        assert!(sup.stats(&id).is_none(), "a stopped server has no uptime");
-        assert!(sup.stats(&ServerId("never-run".into())).is_none());
+        force_kill(&mut child).await;
+
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("a force-killed process must not outlive the call");
+        assert!(status.is_ok());
     }
 
     #[tokio::test]
@@ -979,7 +1041,8 @@ mod tests {
         let err = sup.reject_if_active(&id).unwrap_err();
         assert!(matches!(err, CoreError::Precondition { .. }));
 
-        let _ = sup.kill(&id);
+        // No cleanup call: the command carries kill_on_drop, and `long_running`
+        // is a 15-second ping either way.
     }
 
     #[tokio::test]
@@ -996,7 +1059,8 @@ mod tests {
         let err = sup.send(&id, "list".into()).unwrap_err();
         assert!(matches!(err, CoreError::Precondition { .. }));
 
-        let _ = sup.kill(&id);
+        // No cleanup call: the command carries kill_on_drop, and `long_running`
+        // is a 15-second ping either way.
     }
 
     /// The installer path waits on this receiver, so a zero exit has to arrive

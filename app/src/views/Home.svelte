@@ -27,11 +27,11 @@
     startServer,
     stopServer,
   } from "../lib/api";
+  import { isActive, primaryAction, STATE_LABEL } from "../lib/serverState";
   import {
     errorMessage,
     isCoreError,
     type DownloadedFile,
-    type ServerState,
     type ServerSummary,
   } from "../lib/types";
 
@@ -45,18 +45,8 @@
     openServer: (id: ServerSummary["id"]) => void;
   } = $props();
 
-  const STATE_LABEL: Record<ServerState["kind"], string> = {
-    stopped: "已停止",
-    installing: "安裝中",
-    starting: "啟動中",
-    online: "執行中",
-    stopping: "停止中",
-    crashed: "已當機",
-  };
-
   /** Up, or on its way there — the grouping the header counts. */
-  const isUp = (s: ServerSummary) =>
-    s.state.kind !== "stopped" && s.state.kind !== "crashed";
+  const isUp = (s: ServerSummary) => isActive(s.state);
 
   let servers = $state<ServerSummary[]>([]);
   let error = $state<string | null>(null);
@@ -237,8 +227,15 @@
   onMount(() => {
     refresh();
     const unlisten = onCoreEvent((event) => {
-      // Both change what a card shows. Refetching keeps the UI from holding a
-      // second, half-updated copy of core state.
+      // The event already carries the new state, so apply it directly rather
+      // than waiting on the refetch. The refetch still runs — it brings the
+      // player count and uptime with it — but a card must not sit on a stale
+      // state if that call is slow, or fails, or lands out of order.
+      if (event.type === "serverState") {
+        servers = servers.map((s) =>
+          s.id === event.id ? { ...s, state: event.state, light: event.light } : s,
+        );
+      }
       if (event.type === "serversChanged" || event.type === "serverState") refresh();
 
       // The installer's own output is the only progress it reports, so the
@@ -336,6 +333,7 @@
 
         <div class="grid">
           {#each group.list as server (server.id)}
+            {@const action = primaryAction(server.state)}
             <!-- The whole card is the link to the server's page; the action
                  buttons inside stop the click from reaching it. -->
             <div
@@ -372,23 +370,20 @@
               </div>
 
               <div class="actions">
-                {#if isUp(server)}
-                  <button
-                    class="act"
-                    onclick={(e) => (e.stopPropagation(), run(() => stopServer(server.id)))}
-                  >
-                    <Icon name="square" size={13} />
-                    停止
-                  </button>
-                {:else}
-                  <button
-                    class="act primary"
-                    onclick={(e) => (e.stopPropagation(), start(server.id))}
-                  >
-                    <Icon name="play" size={13} />
-                    啟動
-                  </button>
-                {/if}
+                <button
+                  class="act"
+                  class:primary={action.primary}
+                  disabled={action.disabled}
+                  onclick={(e) => (
+                    e.stopPropagation(),
+                    action.run === "start"
+                      ? start(server.id)
+                      : action.run === "stop" && run(() => stopServer(server.id))
+                  )}
+                >
+                  <Icon name={action.icon} size={13} />
+                  {action.label}
+                </button>
                 <button
                   class="act icon"
                   onclick={(e) => (e.stopPropagation(), openEdit(server))}
@@ -890,14 +885,19 @@
     font-weight: 600;
     transition: background-color 120ms var(--ease);
   }
-  .act:hover {
+  .act:hover:not(:disabled) {
     background: var(--wash-2);
+  }
+  /* Installing and stopping are already going somewhere; the button says so
+     and does nothing until they land. */
+  .act:disabled {
+    opacity: 0.5;
   }
   .act.primary {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent);
   }
-  .act.primary:hover {
+  .act.primary:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .act.icon {

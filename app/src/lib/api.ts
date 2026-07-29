@@ -14,10 +14,10 @@ import {
   type CoreEvent,
   type DownloadedFile,
   type DownloadId,
-  type DownloadKind,
   type ForgeVersionGroup,
   type LogLine,
   type ServerConfig,
+  type ModFile,
   type ServerFile,
   type ServerId,
   type ServerProperties,
@@ -77,21 +77,12 @@ export const writeServerFile = (id: ServerId, file: ServerFile, text: string) =>
 export const openServerFolder = (id: ServerId) =>
   invoke<void>("open_server_folder", { id });
 
-export const getEula = (id: ServerId) => invoke<boolean>("get_eula", { id });
-
-export const setEula = (id: ServerId, accepted: boolean) =>
-  invoke<void>("set_eula", { id, accepted });
-
 // ── console ─────────────────────────────────────────────────
 
 /** Only the lines newer than `afterSeq`. Sequences start at 1, so pass 0 for
  *  everything the buffer still holds. */
 export const consoleSince = (id: ServerId, afterSeq: number) =>
   invoke<LogLine[]>("console_since", { id, afterSeq });
-
-/** Oldest sequence still in the ring buffer, or `null` when empty. */
-export const consoleOldestSeq = (id: ServerId) =>
-  invoke<number | null>("console_oldest_seq", { id });
 
 // ── process control ─────────────────────────────────────────
 
@@ -104,22 +95,25 @@ export const startServer = (id: ServerId) => invoke<void>("start_server", { id }
  */
 export const stopServer = (id: ServerId) => invoke<void>("stop_server", { id });
 
-/**
- * Immediate termination, skipping the save. Only for a server that has stopped
- * responding — warn before calling.
- */
-export const killServer = (id: ServerId) => invoke<void>("kill_server", { id });
 
 /** Type a line into the server console. Only valid while `online`. */
 export const sendConsoleCommand = (id: ServerId, command: string) =>
   invoke<void>("send_console_command", { id, command });
 
+// ── mods ────────────────────────────────────────────────────
+
+/** Jars in the server's `mods/`, alphabetical. Empty for a folder with none. */
+export const listMods = (id: ServerId) => invoke<ModFile[]>("list_mods", { id });
+
 /**
- * Run a Forge installer into the server folder. Does not accept the EULA —
- * call `setEula` for that, driven by the checkbox the user ticked.
+ * Copy jars into `mods/`, replacing any of the same name — which is what
+ * updating a mod looks like. Refused while the server is running.
  */
-export const installForge = (id: ServerId, installer: string) =>
-  invoke<void>("install_forge", { id, installer });
+export const addMods = (id: ServerId, paths: string[]) =>
+  invoke<void>("add_mods", { id, paths });
+
+export const deleteMod = (id: ServerId, name: string) =>
+  invoke<void>("delete_mod", { id, name });
 
 // ── java ────────────────────────────────────────────────────
 
@@ -132,18 +126,6 @@ export const installJava = (major: number) =>
   invoke<void>("install_java", { major });
 
 // ── downloads ───────────────────────────────────────────────
-
-/**
- * Begin a download; resolves with its id as soon as it starts, not when it
- * finishes. Watch `CoreEvent` of type `download` for progress and the outcome.
- *
- * `filename` is a bare name — any directory part is stripped by the core.
- */
-export const startDownload = (
-  what: DownloadKind,
-  url: string,
-  filename: string,
-) => invoke<DownloadId>("start_download", { what, url, filename });
 
 /** Ask a running download to stop. Unknown ids are ignored. */
 export const cancelDownload = (id: DownloadId) =>

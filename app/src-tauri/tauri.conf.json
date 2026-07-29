@@ -34,7 +34,8 @@
     ],
     "icon": [
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {

@@ -425,24 +425,40 @@ pub struct ModFile {
 
 /// Which Java major a given Minecraft version needs.
 ///
-/// Mojang's floor, not Forge's preference: 1.20.5+ requires 21, 1.18–1.20.4
-/// requires 17, 1.17.x requires 16, and everything older runs on 8.
+/// Two numbering schemes have to be read here. Everything up to 1.21.x is the
+/// old `1.<minor>.<patch>` shape, where the leading 1 carries no information
+/// and the floor moved with the minor: 1.20.5+ wants 21, 1.18–1.20.4 wants 17,
+/// 1.17.x wants 16, older runs on 8.
+///
+/// From 26.1 Mojang switched to year-based numbers — 26.1, 26.1.2, 26.2 — and
+/// raised the floor to Java 25. So the leading component stopped being a
+/// constant and started being the version, which is exactly the assumption the
+/// old reading baked in: `26.2` parsed as "minor 2" and came back as Java 8.
+///
+/// A number this app has never heard of is treated as the newest floor we know.
+/// Versions only move forward, and guessing low means a server that refuses to
+/// start with an error about a Java version the user was never offered.
 pub fn required_java_major(mc_version: &str) -> u8 {
     let parts: Vec<u32> = mc_version
         .split('.')
         .filter_map(|p| p.parse().ok())
         .collect();
-    let (minor, patch) = match parts.as_slice() {
-        [_, minor, patch, ..] => (*minor, *patch),
-        [_, minor] => (*minor, 0),
-        _ => return 21,
-    };
-    match (minor, patch) {
-        (m, _) if m >= 21 => 21,
-        (20, p) if p >= 5 => 21,
-        (m, _) if m >= 18 => 17,
-        (17, _) => 16,
-        _ => 8,
+
+    match parts.as_slice() {
+        // The old scheme is the only one that starts with 1.
+        [1, minor, rest @ ..] => {
+            let patch = rest.first().copied().unwrap_or(0);
+            match (*minor, patch) {
+                (m, _) if m >= 21 => 21,
+                (20, p) if p >= 5 => 21,
+                (m, _) if m >= 18 => 17,
+                (17, _) => 16,
+                _ => 8,
+            }
+        }
+        // 26.1 and everything after it.
+        [_, ..] => 25,
+        [] => 25,
     }
 }
 
@@ -581,6 +597,20 @@ mod tests {
         assert_eq!(required_java_major("1.20.4"), 17);
         assert_eq!(required_java_major("1.20.6"), 21);
         assert_eq!(required_java_major("1.21.4"), 21);
+        assert_eq!(required_java_major("1.21"), 21, "a two-part old version");
+    }
+
+    /// 26.1 moved to year-based numbers and to Java 25. Read with the old
+    /// rules, "26.2" looks like minor 2 and comes back as Java 8 — a server
+    /// that then refuses to start, blaming a Java version nobody offered.
+    #[test]
+    fn the_year_based_versions_need_java_25() {
+        assert_eq!(required_java_major("26.1"), 25);
+        assert_eq!(required_java_major("26.1.2"), 25);
+        assert_eq!(required_java_major("26.2"), 25);
+        // Nothing newer exists yet; the newest floor we know beats guessing low.
+        assert_eq!(required_java_major("27.1"), 25);
+        assert_eq!(required_java_major(""), 25);
     }
 
     #[test]

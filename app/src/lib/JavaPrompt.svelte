@@ -2,7 +2,7 @@
   "This needs Java N — get it?"
 
   Raised by whatever launch just failed, not by a check on startup. Java is
-  ~45 MB and most machines running a Minecraft server already have one, so
+  40-60 MB and most machines running a Minecraft server already have one, so
   nothing is fetched until a real launch has actually been blocked by it.
 
   On success it calls `onready`, which is the caller's retry — the user pressed
@@ -80,7 +80,7 @@
     這個版本要用 Java {major} 才能執行，這台電腦上沒有找到。
   </p>
   <p class="note">
-    會從 Adoptium 下載官方的 JRE（約 45 MB），只給這個 app 用，不會動到系統既有的 Java。
+    會從 Adoptium 下載官方的 JRE（40–60 MB，視版本而定），只給這個 app 用，不會動到系統既有的 Java。
   </p>
 
   {#if busy}
@@ -102,7 +102,7 @@
   {/if}
 
   {#snippet footer()}
-    <!-- While a transfer is running, cancelling means cancelling *it* — 45 MB
+    <!-- While a transfer is running, cancelling means cancelling *it* — tens of megabytes
          is long enough that closing the dialog and leaving it running would be
          the wrong reading of the button. -->
     <Button onclick={cancel} disabled={busy && !progress}>取消</Button>

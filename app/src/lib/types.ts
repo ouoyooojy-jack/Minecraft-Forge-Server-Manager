@@ -43,8 +43,13 @@ export interface ServerSummary {
   maxPlayers: number | null;
   /** Adopted from elsewhere on disk; deleting only unlinks it. */
   imported: boolean;
-  /** Live process facts — `null` unless the server is running. */
-  playersOnline: number | null;
+  /**
+   * Who is connected — `null` unless the server is running.
+   *
+   * The names rather than a count, so the card and the server page's roster
+   * cannot disagree about how many there are.
+   */
+  players: string[] | null;
   uptimeSecs: number | null;
 }
 
@@ -60,10 +65,14 @@ export interface ServerConfig {
   forgeVersion: string | null;
   /** Set when the server lives outside the managed folder. */
   externalPath: string | null;
+  /**
+   * Start again by itself after a crash.
+   *
+   * Never blind: the core skips the restart for faults a restart cannot fix,
+   * and gives up after a few tries rather than looping all night.
+   */
+  restartOnCrash: boolean;
 }
-
-export type Gamemode = "survival" | "creative" | "adventure" | "spectator";
-export type Difficulty = "peaceful" | "easy" | "normal" | "hard";
 
 /**
  * The files the raw editor may open. The core maps these to paths, so the UI
@@ -117,17 +126,68 @@ export interface AgentSettings {
   token: string;
 }
 
-/** The subset of server.properties the settings modal edits. */
-export interface ServerProperties {
-  motd: string;
-  port: number;
-  maxPlayers: number;
-  gamemode: Gamemode;
-  difficulty: Difficulty;
-  pvp: boolean;
-  onlineMode: boolean;
-  viewDistance: number;
-  whiteList: boolean;
+// ── server.properties ───────────────────────────────────────
+
+/** Which section of the settings tab a key appears under. */
+export type PropertyGroup = "connection" | "gameplay" | "world" | "advanced";
+
+export interface EnumOption {
+  value: string;
+  label: string;
+}
+
+interface PropertyBase {
+  key: string;
+  /** Chinese label, or the raw key for one this app has no row for. */
+  label: string;
+  group: PropertyGroup;
+  /**
+   * Current value as it sits in the file. A string for every kind, including
+   * the numeric ones — the file holds text, and a round trip through `number`
+   * would eventually write `20.0` where Minecraft wants `20`.
+   */
+  value: string;
+  hint: string;
+  /** False for a key the core has no row for: free text, shown last. */
+  known: boolean;
+}
+
+/**
+ * One editable line of server.properties, with the control that edits it.
+ *
+ * Rust flattens `PropertyKind` into the field, so `kind` sits alongside `key`
+ * rather than nested — spelled out as four members here so that switching on
+ * `kind` narrows to the extra fields each control needs.
+ */
+export type PropertyField =
+  | (PropertyBase & { kind: "bool" })
+  | (PropertyBase & { kind: "enum"; options: EnumOption[] })
+  | (PropertyBase & { kind: "int"; min: number | null; max: number | null })
+  | (PropertyBase & { kind: "text" });
+
+// ── why a server stopped ────────────────────────────────────
+
+/**
+ * The next step to offer, not a message to print.
+ *
+ * Each variant names somewhere in this app, so the UI can render a button that
+ * goes there rather than telling the user to go looking.
+ */
+export type Fix =
+  | { kind: "memory" }
+  | { kind: "port" }
+  | { kind: "java"; major: number }
+  | { kind: "mods" }
+  | { kind: "eula" };
+
+export interface CrashInfo {
+  /** One Chinese sentence: what went wrong. */
+  headline: string;
+  /** The lines it was read off. Display verbatim; never parse this. */
+  detail: string;
+  fix: Fix | null;
+  /** The crash report on disk, when Minecraft wrote one. */
+  path: string | null;
 }
 
 // ── console ─────────────────────────────────────────────────
@@ -173,9 +233,23 @@ export function downloadPercent(p: DownloadProgress): number | null {
 
 /** One jar in a server's `mods/` folder. */
 export interface ModFile {
-  /** File name — also the handle for deleting it. */
+  /** File name — also the handle for deleting it. Always the enabled
+   *  spelling, so toggling a mod does not change how it is addressed. */
   name: string;
   bytes: number;
+  /** Forge loads `*.jar` only; a disabled mod is the same file renamed. */
+  enabled: boolean;
+}
+
+/** One saved copy of a world. */
+export interface Backup {
+  /** File name, and the handle for restore and delete. */
+  name: string;
+  bytes: number;
+  /** Unix seconds. */
+  createdSecs: number;
+  /** Taken automatically just before a restore, rather than asked for. */
+  automatic: boolean;
 }
 
 /** An installer jar in the downloads folder. */
@@ -207,6 +281,9 @@ export type CoreEvent =
   | { type: "serverState"; id: ServerId; state: ServerState; light: StatusLight }
   | { type: "serverLog"; id: ServerId; lines: LogLine[] }
   | { type: "serversChanged" }
+  // The whole roster, not a delta: a page that opened mid-session would never
+  // catch up from joins and leaves alone.
+  | { type: "players"; id: ServerId; names: string[] }
   | { type: "agentActivity"; line: string }
   // Rust tags this newtype variant internally, so the progress fields sit
   // alongside `type` rather than nested under a key.

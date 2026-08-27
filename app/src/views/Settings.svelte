@@ -10,15 +10,14 @@
   import { onMount } from "svelte";
 
   import Button from "../lib/Button.svelte";
-  import Icon from "../lib/Icon.svelte";
   import {
     getAgentSettings,
+    reportIssue,
     onCoreEvent,
     regenerateAgentToken,
     setAgentSettings,
   } from "../lib/api";
   import { errorMessage, type AgentSettings } from "../lib/types";
-  import { THEMES, theme, type ThemeName } from "../lib/theme.svelte";
 
   /** How many recent connections to keep on screen. Enough to see what just
    *  happened, not a log file. */
@@ -70,59 +69,25 @@
     return () => void unlisten.then((fn) => fn());
   });
 
-  /**
-   * A swatch has to paint the palette it *offers*, not the one in use, so these
-   * are the only literal colours in the app. Keep them in step with app.css.
-   */
-  const SWATCH: Record<ThemeName, Record<string, string>> = {
-    dark: { bg: "#131316", rail: "#0e0e11", surface: "#1b1b20", border: "#2b2b32", accent: "#e8e8ec" },
-    light: { bg: "#f7f8f9", rail: "#eef0f3", surface: "#ffffff", border: "#e3e6ea", accent: "#16181c" },
-    claude: { bg: "#faf9f7", rail: "#f2efea", surface: "#ffffff", border: "#e6e1d9", accent: "#b4530a" },
-  };
-
-  const swatchVars = (name: ThemeName) =>
-    Object.entries(SWATCH[name])
-      .map(([k, v]) => `--s-${k}:${v}`)
-      .join(";");
 </script>
 
 <section class="page">
   <header><h1>設定</h1></header>
 
   <div class="setting">
-    <h2>主題</h2>
-    <p class="sub">立即套用，並記住到下次啟動。</p>
-
-    <div class="grid">
-      {#each THEMES as option (option.name)}
-        <button
-          class="tile"
-          class:active={theme.name === option.name}
-          onclick={() => theme.set(option.name)}
-          aria-pressed={theme.name === option.name}
-        >
-          <!-- A miniature of the window, so you can see a palette without
-               having to switch to it first. -->
-          <span class="swatch" style={swatchVars(option.name)}>
-            <span class="s-rail"></span>
-            <span class="s-body">
-              <span class="s-card"></span>
-              <span class="s-accent"></span>
-            </span>
-          </span>
-          <span class="name">
-            {option.label}
-            {#if theme.name === option.name}
-              <span class="check"><Icon name="check" size={14} strokeWidth={2.5} /></span>
-            {/if}
-          </span>
-          <span class="desc">{option.desc}</span>
-        </button>
-      {/each}
+    <h2>回報與建議</h2>
+    <p class="sub">
+      問題和建議都走同一個入口，表單第一行才分。在 GitHub 上開一則 issue，
+      版本和該回答的問題都會先填好。送出前你會看到全部內容，
+      沒有任何東西是從這裡自動傳出去的。
+    </p>
+    <div class="feedback">
+      <Button onclick={reportIssue}>開一則 issue</Button>
     </div>
-
-    <p class="note">
-      標題列的按鈕只在深色與淺色之間切換，並會記得你在這裡選的淺色主題。
+    <p class="sub small">
+      回報當機或啟動失敗時，先到「伺服器頁 → 設定 → 原始檔 → 匯出診斷檔」拿到 zip，
+      再拖進 issue。裡面有主控台、Minecraft 的 log、當機報告和模組清單——
+      也有玩家名稱，附不附上由你決定。
     </p>
   </div>
 
@@ -192,6 +157,18 @@
 </section>
 
 <style>
+  .feedback {
+    display: flex;
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  .sub.small {
+    padding-top: 10px;
+    color: var(--faint);
+    font-size: var(--font-small);
+  }
+
   .page {
     height: 100%;
     display: flex;
@@ -201,11 +178,17 @@
     overflow: auto;
   }
 
+  /* A wordmark, not a heading. On a geometric face the authority comes from
+     the drawing — even stroke, circular bowls — and a heavy weight destroys
+     exactly that by thickening the monoline into a slab. Weight stays at 500
+     and the letters are pulled together instead; that tightening is what makes
+     a large geometric line read as set rather than merely enlarged. */
   h1 {
     margin: 0;
+    font-family: var(--font-display);
     font-size: var(--font-hero);
-    font-weight: 600;
-    letter-spacing: -0.4px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
   }
 
   .row {
@@ -239,7 +222,6 @@
     margin: 3px;
     border-radius: 50%;
     background: var(--surface);
-    box-shadow: var(--shadow);
     transition: transform 140ms var(--ease);
   }
 
@@ -327,7 +309,6 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-card);
     background: var(--surface-veil);
-    box-shadow: var(--shadow), var(--edge-highlight);
   }
 
   h2 {
@@ -342,80 +323,139 @@
     color: var(--muted);
   }
 
-  .grid {
-    margin-top: 16px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: var(--gap-field);
-  }
-
-  .tile {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-button);
-    background: transparent;
-    text-align: left;
-    transition: border-color 130ms var(--ease), background-color 130ms var(--ease);
-  }
-  .tile:hover {
-    background: var(--wash);
-  }
-  .tile.active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-  }
-
-  .swatch {
-    height: 62px;
-    display: flex;
-    border: 1px solid var(--s-border);
-    border-radius: 6px;
-    background: var(--s-bg);
-    overflow: hidden;
-  }
-  .s-rail {
-    width: 14px;
-    flex: none;
-    background: var(--s-rail);
-  }
-  .s-body {
-    flex: 1;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .s-card {
-    height: 20px;
-    border-radius: 4px;
-    background: var(--s-surface);
-    border: 1px solid var(--s-border);
-  }
-  .s-accent {
-    height: 10px;
-    width: 46px;
-    border-radius: var(--radius-pill);
-    background: var(--s-accent);
-  }
-
-  .name {
+  .row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    font-weight: 600;
+    gap: 14px;
+    margin-top: 14px;
   }
-  .check {
+
+  .toggle {
     display: flex;
-    color: var(--accent);
+    align-items: center;
+    gap: 10px;
+    font-size: var(--font-body);
   }
-  .desc {
+
+  .toggle input {
+    appearance: none;
+    width: 39px;
+    height: 22px;
+    border-radius: var(--radius-pill);
+    background: var(--wash-2);
+    transition: background-color 140ms var(--ease);
+  }
+
+  .toggle input::after {
+    content: "";
+    display: block;
+    width: 16px;
+    height: 16px;
+    margin: 3px;
+    border-radius: 50%;
+    background: var(--surface);
+    transition: transform 140ms var(--ease);
+  }
+
+  .toggle input:checked {
+    background: var(--accent);
+  }
+
+  .toggle input:checked::after {
+    transform: translateX(17px);
+  }
+
+  .port {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .port input,
+  .token {
+    height: 34px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: var(--font-small);
+  }
+
+  .port input {
+    width: 96px;
+    user-select: text;
+  }
+
+  .token-row .label {
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .token {
+    letter-spacing: 0.12em;
+    user-select: text;
+  }
+
+  .agent-error {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--error) 10%, transparent);
+    border-radius: var(--radius-input);
+    color: var(--error);
+    font-size: var(--font-small);
+  }
+
+  .activity {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  .activity h3 {
+    color: var(--muted);
+    font-size: var(--font-small);
+    font-weight: 500;
+  }
+
+  .activity ul {
+    margin-top: 8px;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-family: var(--font-mono);
     font-size: var(--font-tiny);
     color: var(--muted);
+    user-select: text;
   }
+
+  .setting {
+    max-width: 720px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    background: var(--surface-veil);
+  }
+
+  h2 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .sub {
+    margin: 4px 0 0;
+    font-size: var(--font-small);
+    color: var(--muted);
+  }
+
+
 
   .note {
     margin: 16px 0 0;

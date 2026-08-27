@@ -85,7 +85,7 @@
     background: var(--surface-veil);
     backdrop-filter: blur(28px) saturate(160%);
     color: var(--fg);
-    box-shadow: var(--shadow-hi), var(--edge-highlight);
+    box-shadow: var(--shadow-modal);
     overflow: hidden;
     animation: rise 180ms var(--ease);
   }

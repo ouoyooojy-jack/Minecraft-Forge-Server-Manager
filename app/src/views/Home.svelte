@@ -9,6 +9,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
 
   import Button from "../lib/Button.svelte";
   import Icon from "../lib/Icon.svelte";
@@ -16,8 +17,8 @@
   import Modal from "../lib/Modal.svelte";
   import { formatMemory, formatUptime } from "../lib/format";
   import {
+    crashReport,
     createServerFromInstaller,
-    deleteServer,
     getServerConfig,
     importServer,
     listDownloads,
@@ -49,6 +50,15 @@
   const isUp = (s: ServerSummary) => isActive(s.state);
 
   let servers = $state<ServerSummary[]>([]);
+
+  /**
+   * Why each crashed server crashed, keyed by id.
+   *
+   * Fetched per card rather than carried on the summary: the diagnosis reads a
+   * crash report off disk, and doing that for every server on every refresh
+   * would put a file scan behind a list that repaints once a second.
+   */
+  let crashes = $state<Record<string, string>>({});
   let error = $state<string | null>(null);
 
   /** Seconds since the last refresh, for the uptime readouts. */
@@ -64,6 +74,14 @@
   let newName = $state("");
   let installers = $state<DownloadedFile[]>([]);
   let installer = $state("");
+
+  /**
+   * An installer jar dropped straight onto the dialog.
+   *
+   * It is not in the downloads folder, so it cannot be one of the radio
+   * options — it is held separately and shown as an extra row while it lasts.
+   */
+  let droppedInstaller = $state<DownloadedFile | null>(null);
   /** Non-null while an install is running; the text describes the step. */
   let phase = $state<string | null>(null);
   let lastLog = $state<string | null>(null);
@@ -79,7 +97,6 @@
   let editOpen = $state(false);
   let editing = $state<ServerSummary | null>(null);
   let editName = $state("");
-  let confirmingDelete = $state(false);
 
   const visible = $derived(
     servers.filter((s) => {
@@ -125,7 +142,20 @@
     run(async () => {
       servers = await listServers();
       ticks = 0;
+      loadCrashes();
     });
+
+  /** One diagnosis per crashed server, asked for once. Entries for servers
+   *  that are no longer crashed are dropped — the card has moved on. */
+  async function loadCrashes() {
+    const crashed = servers.filter((s) => s.state.kind === "crashed");
+    const next: Record<string, string> = {};
+    for (const server of crashed) {
+      next[server.id] =
+        crashes[server.id] ?? (await crashReport(server.id))?.headline ?? "";
+    }
+    crashes = next;
+  }
 
   /** `forge-1.20.1-47.2.0-installer.jar` → `Forge 1.20.1-47.2.0`. */
   function prettyInstaller(name: string) {
@@ -204,7 +234,6 @@
   function openEdit(server: ServerSummary) {
     editing = server;
     editName = server.name;
-    confirmingDelete = false;
     editOpen = true;
   }
 
@@ -217,15 +246,17 @@
       editOpen = false;
     });
 
-  const remove = () =>
-    editing &&
-    run(async () => {
-      await deleteServer(editing!.id);
-      editOpen = false;
-    }).finally(() => (confirmingDelete = false));
-
   onMount(() => {
     refresh();
+    // A jar dropped while the new-server dialog is open picks itself.
+    const dropped = getCurrentWebview().onDragDropEvent((event) => {
+      if (!addOpen || event.payload.type !== "drop") return;
+      const jar = event.payload.paths.find((p) => p.toLowerCase().endsWith(".jar"));
+      if (!jar) return;
+      droppedInstaller = { path: jar, name: jar.split(/[\\/]/).pop() ?? jar, bytes: 0 };
+      installer = jar;
+    });
+
     const unlisten = onCoreEvent((event) => {
       // The event already carries the new state, so apply it directly rather
       // than waiting on the refetch. The refetch still runs — it brings the
@@ -251,6 +282,7 @@
     return () => {
       clearInterval(tick);
       void unlisten.then((fn) => fn());
+      void dropped.then((fn) => fn());
     };
   });
 </script>
@@ -298,7 +330,7 @@
   <div class="toolbar">
     <label class="search">
       <Icon name="search" size={15} />
-      <input bind:value={query} placeholder="搜尋伺服器" />
+      <input bind:value={query} placeholder="Search server" />
     </label>
 
     <div class="segmented" role="group" aria-label="篩選">
@@ -331,45 +363,55 @@
           <span class="line"></span>
         </div>
 
-        <div class="grid">
+        <ul class="list">
           {#each group.list as server (server.id)}
             {@const action = primaryAction(server.state)}
-            <!-- The whole card is the link to the server's page; the action
-                 buttons inside stop the click from reaching it. -->
-            <div
-              class="card"
-              role="button"
-              tabindex="0"
-              onclick={() => openServer(server.id)}
-              onkeydown={(e) => e.key === "Enter" && openServer(server.id)}
-            >
-              <h3>
+            <!-- The row is the link to the server's page; the buttons inside
+                 stop the click from reaching it. -->
+            <li>
+              <div
+                class="row"
+                role="button"
+                tabindex="0"
+                onclick={() => openServer(server.id)}
+                onkeydown={(e) => e.key === "Enter" && openServer(server.id)}
+              >
                 <span class="dot" data-light={server.light}></span>
-                <span class="label" title={server.name}>{server.name}</span>
-              </h3>
 
-              <p class="meta">
-                <span class="state" data-light={server.light}>
-                  {STATE_LABEL[server.state.kind]}
+                <span class="ident">
+                  <span class="name" title={server.name}>{server.name}</span>
+                  <span class="meta">
+                    {STATE_LABEL[server.state.kind]}
+                    <span class="sep">·</span>{versionLine(server)}{server.imported
+                      ? " · 已匯入"
+                      : ""}
+                  </span>
+                  <!-- Only ever one of these: a running server names who is on
+                       it, a crashed one says why it stopped. -->
+                  {#if server.players?.length}
+                    <span class="who">{server.players.join("、")}</span>
+                  {:else if crashes[server.id]}
+                    <span class="why">{crashes[server.id]}</span>
+                  {/if}
                 </span>
-                · {versionLine(server)}{server.imported ? " · 已匯入" : ""}
-              </p>
 
-              <!-- A running server shows what it is doing; a stopped one has
-                   nothing to report, so it shows what it is configured as. -->
-              <div class="facts tabular">
-                {#if server.uptimeSecs !== null}
-                  <span>{formatUptime(uptimeOf(server))}</span>
-                  <span>{server.playersOnline ?? 0} / {server.maxPlayers ?? "—"} 人</span>
-                  <span>{formatMemory(server.memoryMb)}</span>
-                {:else}
-                  <span class:dim={server.port === null}>:{server.port ?? "—"}</span>
-                  <span>{formatMemory(server.memoryMb)}</span>
-                  <span class:dim={server.maxPlayers === null}>{server.maxPlayers ?? "—"} 人</span>
-                {/if}
-              </div>
+                <!-- A running server shows what it is doing; a stopped one has
+                     nothing to report, so it shows what it is configured as.
+                     Both sets are right-aligned on the same column so the eye
+                     can run down them. -->
+                <span class="facts tabular">
+                  {#if server.uptimeSecs !== null}
+                    {formatUptime(uptimeOf(server))}<span class="gap"></span>{server.players
+                      ?.length ?? 0} / {server.maxPlayers ?? "—"} 人<span class="gap"></span>{formatMemory(
+                      server.memoryMb,
+                    )}
+                  {:else}
+                    :{server.port ?? "—"}<span class="gap"></span>{server.maxPlayers ?? "—"} 人<span
+                      class="gap"
+                    ></span>{formatMemory(server.memoryMb)}
+                  {/if}
+                </span>
 
-              <div class="actions">
                 <button
                   class="act"
                   class:primary={action.primary}
@@ -381,20 +423,19 @@
                       : action.run === "stop" && run(() => stopServer(server.id))
                   )}
                 >
-                  <Icon name={action.icon} size={13} />
                   {action.label}
                 </button>
                 <button
-                  class="act icon"
+                  class="act more"
                   onclick={(e) => (e.stopPropagation(), openEdit(server))}
                   aria-label="更多選項"
                 >
-                  <Icon name="ellipsis" size={16} />
+                  <Icon name="ellipsis" size={15} />
                 </button>
               </div>
-            </div>
+            </li>
           {/each}
-        </div>
+        </ul>
       </section>
     {/if}
   {/each}
@@ -411,7 +452,7 @@
 <Modal bind:open={addOpen} title="新增伺服器" width={480}>
   <div class="form">
     <label class="field">
-      <span>伺服器名稱</span>
+      <span>Server name</span>
       <input
         bind:value={newName}
         placeholder="my server"
@@ -420,9 +461,10 @@
       />
     </label>
 
-    {#if installers.length === 0}
+    {#if installers.length === 0 && !droppedInstaller}
       <div class="empty-box">
         <p>下載資料夾裡還沒有 Forge 安裝檔。</p>
+        <p class="drop-hint">也可以直接把安裝檔拖進這個視窗。</p>
         <Button onclick={() => ((addOpen = false), goToDownloads())}>前往下載頁</Button>
       </div>
     {:else}
@@ -433,6 +475,13 @@
             {#each installers as file (file.path)}
               <option value={file.path}>{prettyInstaller(file.name)}</option>
             {/each}
+            <!-- A jar dropped onto the window is not in the downloads folder,
+                 so it is listed separately rather than pretending to be. -->
+            {#if droppedInstaller}
+              <option value={droppedInstaller.path}>
+                {prettyInstaller(droppedInstaller.name)}（拖入）
+              </option>
+            {/if}
           </select>
           <Icon name="chevron-down" size={14} />
         </div>
@@ -449,7 +498,7 @@
           <p class="log">{lastLog}</p>
         {/if}
       </div>
-    {:else if installers.length}
+    {:else if installers.length || droppedInstaller}
       <p class="hint">
         安裝 Forge 需要機器上有對應版本的 Java。建立即表示你同意
         <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Minecraft EULA</a>。
@@ -471,9 +520,9 @@
   {/snippet}
 </Modal>
 
-<Modal bind:open={editOpen} title="伺服器選項" width={460}>
+<Modal bind:open={editOpen} title="Rename" width={460}>
   <label class="field">
-    <span>伺服器名稱</span>
+    <span>Server name</span>
     <input bind:value={editName} onkeydown={(e) => e.key === "Enter" && saveName()} />
   </label>
   <p class="hint">
@@ -485,22 +534,8 @@
   </p>
 
   {#snippet footer()}
-    {#if confirmingDelete}
-      <span class="confirm">
-        {editing?.imported
-          ? "確定移除？只會解除連結，你的資料夾不會被刪除。"
-          : "確定刪除？資料夾與世界存檔都會消失。"}
-      </span>
-      <Button onclick={() => (confirmingDelete = false)}>取消</Button>
-      <Button danger onclick={remove}>{editing?.imported ? "確定移除" : "確定刪除"}</Button>
-    {:else}
-      <Button danger onclick={() => (confirmingDelete = true)}>
-        {editing?.imported ? "移除" : "刪除"}
-      </Button>
-      <span class="grow"></span>
-      <Button onclick={() => (editOpen = false)}>取消</Button>
-      <Button variant="primary" disabled={!editName.trim()} onclick={saveName}>儲存</Button>
-    {/if}
+    <Button onclick={() => (editOpen = false)}>取消</Button>
+    <Button variant="primary" disabled={!editName.trim()} onclick={saveName}>儲存</Button>
   {/snippet}
 </Modal>
 
@@ -520,11 +555,17 @@
     justify-content: space-between;
     gap: var(--gap-section);
   }
+  /* A wordmark, not a heading. On a geometric face the authority comes from
+     the drawing — even stroke, circular bowls — and a heavy weight destroys
+     exactly that by thickening the monoline into a slab. Weight stays at 500
+     and the letters are pulled together instead; that tightening is what makes
+     a large geometric line read as set rather than merely enlarged. */
   h1 {
     margin: 0;
+    font-family: var(--font-display);
     font-size: var(--font-hero);
-    font-weight: 600;
-    letter-spacing: -0.4px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
   }
 
   /* ── split button ────────────────────────────────────── */
@@ -576,7 +617,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-card);
     background: var(--surface);
-    box-shadow: var(--shadow-hi);
+    box-shadow: var(--shadow-modal);
     animation: pop 140ms var(--ease);
   }
   @keyframes pop {
@@ -701,6 +742,26 @@
     color: var(--error);
     font-size: var(--font-small);
   }
+  /* One line under the name: who is on, or why it stopped. Both are the
+     card's own news, so they sit with the name rather than in the aligned
+     facts column, which is for numbers you scan down. */
+  .who,
+  .why {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--font-small);
+  }
+
+  .who {
+    color: var(--muted);
+  }
+
+  .why {
+    color: var(--error);
+  }
+
   .empty {
     margin: 0;
     color: var(--muted);
@@ -743,58 +804,44 @@
     background: var(--border);
   }
 
-  /* `1fr` tracks so the row packs as many columns as fit, with the cap on the
-     card. Capping the track instead makes auto-fill count columns at the
-     maximum width and leave a dead strip on the right. */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(264px, 1fr));
-    gap: 18px;
+  .list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
 
-  .card {
-    display: flex;
-    flex-direction: column;
-    min-height: 170px;
-    max-width: 320px;
-    padding: 16px 18px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-card);
-    background: var(--surface-veil);
-    box-shadow: var(--shadow), var(--edge-highlight);
-    transition: transform 170ms var(--ease), box-shadow 170ms var(--ease),
-      border-color 170ms var(--ease);
-  }
-  .card:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+  /* One hairline between rows and none around the group: the boundary that
+     matters is between two servers, not around the set of them. */
+  .list li + li .row {
+    border-top: 1px solid var(--border);
   }
 
-  .card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-hi), var(--edge-highlight);
-    border-color: color-mix(in srgb, var(--muted) 45%, transparent);
-  }
-
-  .card h3 {
+  .row {
+    width: 100%;
     display: flex;
     align-items: center;
-    gap: 9px;
-    margin: 0;
-    font-size: 19px;
-    font-weight: 600;
-    letter-spacing: -0.2px;
-    overflow: hidden;
+    gap: 18px;
+    padding: 15px 4px;
+    background: none;
+    border: 0;
+    text-align: left;
+    transition: background-color 120ms var(--ease);
   }
-  .card h3 .label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+
+  .row:hover {
+    /* A wash the width of the row, rather than a lifted card: the row is a
+       target, not an object. */
+    background: var(--wash);
+  }
+
+  .row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     flex: none;
     border-radius: 50%;
     background: var(--offline);
@@ -802,108 +849,87 @@
   .dot[data-light="online"] {
     background: var(--online);
   }
+  .dot[data-light="starting"] {
+    background: var(--starting);
+  }
   .dot[data-light="error"] {
     background: var(--error);
   }
-  /* Starting is the only transient state, so it is the only thing that moves. */
-  .dot[data-light="starting"] {
-    background: var(--starting);
-    animation: pulse 1.6s var(--ease) infinite;
-  }
-  @keyframes pulse {
-    0%,
-    100% {
-      opacity: 1;
-    }
-    50% {
-      opacity: 0.35;
-    }
+
+  .ident {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
-  /* The state is still a word, not just a colour — it shares the meta line
-     rather than owning a pill and a row of its own. */
-  .meta {
-    margin: 5px 0 0;
-    font-size: var(--font-small);
-    color: var(--muted);
+  .name {
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .meta .state {
-    font-weight: 600;
-    color: var(--offline);
-  }
-  .meta .state[data-light="online"] {
-    color: var(--online);
-  }
-  .meta .state[data-light="starting"] {
-    color: var(--starting);
-  }
-  .meta .state[data-light="error"] {
-    color: var(--error);
-  }
 
-  /* Facts, not a dashboard. Unlabelled — ":25565", "4 GB" and "20 人" each say
-     what they are. */
-  .facts {
-    margin: 14px 0 0;
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    font-family: var(--font-mono);
-    font-size: var(--font-small);
+  .meta {
     color: var(--muted);
+    font-size: var(--font-small);
   }
-  .facts span + span::before {
-    content: "·";
-    margin-right: 12px;
-    color: var(--faint);
-  }
-  .facts .dim {
+
+  .meta .sep {
+    margin: 0 6px;
     color: var(--faint);
   }
 
-  .actions {
-    margin-top: auto;
-    padding-top: 14px;
-    display: flex;
-    gap: 8px;
+  /* Fixed width so the numbers line up down the column even as they change. */
+  .facts {
+    width: 216px;
+    flex: none;
+    text-align: right;
+    color: var(--muted);
+    font-size: var(--font-small);
   }
+
+  .facts .gap {
+    display: inline-block;
+    width: 14px;
+  }
+
   .act {
-    flex: 1;
-    height: 36px;
+    height: var(--h-control-sm);
+    flex: none;
+    padding: 0 10px;
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 7px;
     border: 0;
     border-radius: var(--radius-button);
-    background: var(--surface-2);
-    color: var(--fg);
+    background: none;
+    color: var(--muted);
     font-size: var(--font-small);
-    font-weight: 600;
-    transition: background-color 120ms var(--ease);
+    transition: color 120ms var(--ease), background-color 120ms var(--ease);
   }
+
   .act:hover:not(:disabled) {
     background: var(--wash-2);
+    color: var(--fg);
   }
+
   /* Installing and stopping are already going somewhere; the button says so
      and does nothing until they land. */
   .act:disabled {
     opacity: 0.5;
   }
+
   .act.primary {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
     color: var(--accent);
   }
-  .act.primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-  }
-  .act.icon {
-    flex: none;
-    width: 40px;
-    color: var(--muted);
+
+  .act.more {
+    width: var(--h-control-sm);
+    padding: 0;
+    justify-content: center;
   }
 
   /* ── modal fields ────────────────────────────────────── */
@@ -949,6 +975,10 @@
     border: 1px dashed var(--border);
     border-radius: var(--radius-button);
   }
+  .drop-hint {
+    color: var(--faint);
+  }
+
   .empty-box p {
     margin: 0;
     font-size: var(--font-small);
@@ -1047,14 +1077,5 @@
     font-size: var(--font-tiny);
     color: var(--muted);
     line-height: 1.6;
-  }
-  .confirm {
-    flex: 1;
-    align-self: center;
-    font-size: var(--font-small);
-    color: var(--error);
-  }
-  .grow {
-    flex: 1;
   }
 </style>

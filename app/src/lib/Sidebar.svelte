@@ -1,21 +1,18 @@
 <!--
-  The 48px rail from the .pen files, which opens to 180px on the hamburger.
+  A column of four words.
 
-  Labels are always in the DOM, not swapped in on expand: rendering them and
-  clipping the rail keeps the icons from shifting sideways as the width
-  animates, and leaves the accessible name present at both widths.
+  No fill behind the rail and no highlight block behind the current
+  destination: the page and the rail are the same surface, and the only mark
+  is a 2px rule on the active label. Alignment does the separating, which is
+  the whole premise of this design — a slab of tinted background would be a
+  second, redundant boundary.
+
+  The icons are gone with the collapse: a rail this narrow that always shows
+  its labels has nothing to collapse to, and an icon beside a word it repeats
+  is decoration.
 -->
 <script lang="ts">
-  import Icon, { type IconName } from "./Icon.svelte";
-
-  type Dest = { label: string; icon: IconName };
-
-  const DESTS: Dest[] = [
-    { label: "主頁", icon: "home" },
-    { label: "下載", icon: "download" },
-    { label: "遠端", icon: "server" },
-    { label: "設定", icon: "settings-2" },
-  ];
+  const DESTS = ["Home", "Download", "Remote", "Setting"];
 
   let {
     selected = $bindable(0),
@@ -26,110 +23,59 @@
      *  already showing — that click is how you leave a sub-page. */
     onnavigate?: (index: number) => void;
   } = $props();
-  let expanded = $state(false);
 </script>
 
-<nav class="rail" class:expanded aria-label="主導覽">
-  <button
-    class="item"
-    onclick={() => (expanded = !expanded)}
-    aria-expanded={expanded}
-    title={expanded ? "收合選單" : "展開選單"}
-  >
-    <span class="glyph"><Icon name="menu" /></span>
-    <span class="label">收合</span>
-  </button>
-
-  <div class="spacer"></div>
-
-  {#each DESTS as dest, index (dest.icon)}
+<nav aria-label="主導覽">
+  {#each DESTS as label, index (label)}
     <button
       class="item"
       class:active={selected === index}
       onclick={() => ((selected = index), onnavigate?.(index))}
       aria-current={selected === index ? "page" : undefined}
-      title={dest.label}
     >
-      <span class="glyph"><Icon name={dest.icon} /></span>
-      <span class="label">{dest.label}</span>
+      {label}
     </button>
   {/each}
 </nav>
 
 <style>
-  .rail {
+  nav {
     width: var(--sidebar-width);
     flex: none;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 18px 0;
+    gap: 2px;
+    padding: 26px 0 0 20px;
     background: var(--rail-veil);
-    overflow: hidden;
-    transition: width 200ms var(--ease);
   }
 
-  .rail.expanded {
-    width: var(--sidebar-width-open);
-    align-items: stretch;
-    padding: 18px 12px;
-  }
-
-  .spacer {
-    height: 4px;
-  }
-
-  /* A raised tile rather than a tinted row: the active destination reads as a
-     surface lifted out of the rail, which works at both widths without a
-     separate marker element to position. */
   .item {
-    height: 40px;
+    height: 30px;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: var(--radius-button);
-    background: transparent;
+    padding: 0 10px;
+    /* The marker sits in the padding the whole column shares, so the labels
+       stay on one baseline whether or not they carry it. */
+    border-left: 2px solid transparent;
+    margin-left: -2px;
+    background: none;
+    border-top: 0;
+    border-right: 0;
+    border-bottom: 0;
     color: var(--muted);
-    white-space: nowrap;
-    transition: background-color 130ms var(--ease), color 130ms var(--ease),
-      border-color 130ms var(--ease);
-  }
-
-  .rail:not(.expanded) .item {
-    width: 40px;
-  }
-
-  /* Fixed-width box around the glyph so the icon sits at the same x at both
-     rail widths and does not slide during the transition. */
-  .glyph {
-    width: 38px;
-    display: grid;
-    place-items: center;
-    flex: none;
-  }
-
-  .label {
+    font: inherit;
     font-size: var(--font-body);
-    opacity: 0;
-    transition: opacity 140ms var(--ease);
-  }
-
-  .rail.expanded .label {
-    opacity: 1;
+    text-align: left;
+    transition: color 120ms var(--ease);
   }
 
   .item:hover {
-    background: var(--wash);
     color: var(--fg);
   }
 
   .item.active {
-    background: var(--surface);
-    border-color: var(--border);
-    color: var(--accent);
-    box-shadow: var(--shadow);
+    border-left-color: var(--accent);
+    color: var(--fg);
+    font-weight: 500;
   }
 </style>

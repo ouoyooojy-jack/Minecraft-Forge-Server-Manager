@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -52,6 +53,10 @@ struct Running {
     /// When this process was spawned. Uptime counts from here, so it survives
     /// a page being opened long after the server started.
     started: Instant,
+    /// The same moment on the wall clock. `Instant` cannot be compared with a
+    /// file's mtime, and telling this run's crash report from last week's is
+    /// the whole difference between a diagnosis and a wrong guess.
+    started_at: SystemTime,
     /// Who is currently connected, from the server's own join/leave lines.
     /// Nothing else reports this — the query protocol would mean opening a
     /// second connection to a server we are already reading the console of.
@@ -92,18 +97,71 @@ impl Supervisor {
         )
     }
 
-    /// Seconds of uptime and connected players, or `None` when not running.
+    /// Seconds of uptime and who is connected, or `None` when not running.
     ///
     /// The entry outlives the process — it holds the final state so the UI can
     /// see *why* a server stopped — so this filters on the state rather than on
     /// the entry existing, or a stopped server would keep counting up.
-    pub fn stats(&self, id: &ServerId) -> Option<(u64, u32)> {
+    pub fn stats(&self, id: &ServerId) -> Option<(u64, Vec<String>)> {
         self.running
             .lock()
             .expect("supervisor mutex poisoned")
             .get(id)
             .filter(|r| !matches!(r.state, ServerState::Stopped | ServerState::Crashed { .. }))
-            .map(|r| (r.started.elapsed().as_secs(), r.players.len() as u32))
+            .map(|r| {
+                let mut names: Vec<String> = r.players.iter().cloned().collect();
+                names.sort();
+                (r.started.elapsed().as_secs(), names)
+            })
+    }
+
+    /// Every server currently running, newest state first read under one lock.
+    ///
+    /// The shutdown path needs the whole set rather than one id at a time: the
+    /// window is closing, and asking "is anything still up?" between each stop
+    /// would race with the servers that are still on their way down.
+    pub fn active(&self) -> Vec<ServerId> {
+        self.running
+            .lock()
+            .expect("supervisor mutex poisoned")
+            .iter()
+            .filter(|(_, r)| {
+                !matches!(r.state, ServerState::Stopped | ServerState::Crashed { .. })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Who is connected right now. Empty for a server that is not running.
+    pub fn players(&self, id: &ServerId) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .running
+            .lock()
+            .expect("supervisor mutex poisoned")
+            .get(id)
+            .filter(|r| matches!(r.state, ServerState::Online))
+            .map(|r| r.players.iter().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// When the last run of this server started, whether or not it is still up.
+    pub fn launched_at(&self, id: &ServerId) -> Option<SystemTime> {
+        self.running
+            .lock()
+            .expect("supervisor mutex poisoned")
+            .get(id)
+            .map(|r| r.started_at)
+    }
+
+    /// Write a line into a server's console from outside the supervisor.
+    ///
+    /// The auto-restart decision belongs in the log it is about: someone
+    /// reading the console after the fact should see that the app chose to
+    /// bring the server back, not just that it mysteriously started again.
+    pub fn note(&self, id: &ServerId, text: String) {
+        self.push_log(id, LogStream::System, text);
     }
 
     pub fn console_since(&self, id: &ServerId, after_seq: u64) -> Vec<LogLine> {
@@ -330,6 +388,10 @@ impl Supervisor {
                         // hour) that a refetch costs nothing.
                         if roster_changed {
                             emit(CoreEvent::ServersChanged);
+                            emit(CoreEvent::Players {
+                                id: id.clone(),
+                                names: roster(&running, &id),
+                            });
                         }
                     }
 
@@ -405,6 +467,7 @@ impl Supervisor {
                     state,
                     tx,
                     started: Instant::now(),
+                    started_at: SystemTime::now(),
                     players: HashSet::new(),
                 },
             );
@@ -459,6 +522,21 @@ fn launch_plan(dir: &Path, config: &ServerConfig) -> CoreResult<Launch> {
         }
     }
 
+    // The script exists but says nothing about how to launch Java. That is
+    // not a broken install — see `forge_args_file`.
+    if let Some(args_file) = forge_args_file(dir) {
+        let mut args = Vec::new();
+        if dir.join(USER_JVM_ARGS).is_file() {
+            args.push(format!("@{USER_JVM_ARGS}"));
+        }
+        args.push(format!("@{args_file}"));
+        args.push("nogui".into());
+        return Ok(Launch {
+            program: java_binary(config),
+            args,
+        });
+    }
+
     let jar = dir.join("server.jar");
     if jar.is_file() {
         return Ok(Launch {
@@ -476,6 +554,44 @@ fn launch_plan(dir: &Path, config: &ServerConfig) -> CoreResult<Launch> {
     Err(CoreError::Precondition {
         message: "找不到 run.bat 或 server.jar；請先安裝 Forge。".into(),
     })
+}
+
+/// Where Forge puts the arguments it generates, relative to the server folder.
+const FORGE_LIB: &str = "libraries/net/minecraftforge/forge";
+
+/// The JVM flags file Forge's script reads, and where this app writes `-Xmx`.
+const USER_JVM_ARGS: &str = "user_jvm_args.txt";
+
+/// Forge's own argument file, located on disk instead of read out of a script.
+///
+/// `run.bat` belongs to the user. Replacing it with a wrapper — one that opens
+/// Windows Terminal, or sets up ANSI colours, and calls the real `java` line
+/// from a `.ps1` beside it — is an ordinary thing to do, and this app has no
+/// business refusing to start a server over it. Nothing about the launch
+/// actually needs the script: the arguments Forge generates always live at
+/// `libraries/net/minecraftforge/forge/<mc>-<build>/win_args.txt`, so look
+/// there before concluding Forge is not installed.
+///
+/// Returned relative to `dir`, which is the child's working directory, so the
+/// `@file` reads the same way Forge's own script writes it.
+fn forge_args_file(dir: &Path) -> Option<String> {
+    let name = if cfg!(windows) {
+        "win_args.txt"
+    } else {
+        "unix_args.txt"
+    };
+    let mut builds: Vec<String> = std::fs::read_dir(dir.join(FORGE_LIB))
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().join(name).is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    // A folder can hold more than one build after an upgrade. Sorting and
+    // taking the last makes the choice the newest one rather than whatever
+    // order the filesystem happened to hand back.
+    builds.sort();
+
+    Some(format!("{FORGE_LIB}/{}/{name}", builds.pop()?))
 }
 
 /// Lift the real `java` invocation out of Forge's generated run script.
@@ -554,6 +670,23 @@ fn update_players(
     id: &ServerId,
     text: &str,
 ) -> bool {
+    // `list` is the authoritative answer, so it replaces the roster outright.
+    // Join and leave lines are a running total, and a total drifts: a line
+    // dropped under load, or a mod that renames players, and the count is
+    // wrong until restart. Anyone can re-sync by typing `list`.
+    if let Some(names) = roster_from_list(text) {
+        let mut running = running.lock().expect("supervisor mutex poisoned");
+        let Some(entry) = running.get_mut(id) else {
+            return false;
+        };
+        let names: HashSet<String> = names.into_iter().collect();
+        if entry.players == names {
+            return false;
+        }
+        entry.players = names;
+        return true;
+    }
+
     let Some((name, joined)) = player_event(text) else {
         return false;
     };
@@ -585,8 +718,39 @@ fn player_event(text: &str) -> Option<(String, bool)> {
     }
 }
 
+/// The current roster, sorted, for an event payload.
+fn roster(running: &Arc<Mutex<HashMap<ServerId, Running>>>, id: &ServerId) -> Vec<String> {
+    let running = running.lock().expect("supervisor mutex poisoned");
+    let mut names: Vec<String> = running
+        .get(id)
+        .map(|r| r.players.iter().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The reply to `list`: `There are 2 of a max of 20 players online: a, b`.
+///
+/// Matched on the log's own `]: ` prefix, the same guard `player_event` uses —
+/// without it, a player typing the sentence in chat would rewrite the roster.
+fn roster_from_list(text: &str) -> Option<Vec<String>> {
+    let body = text.rsplit_once("]: ")?.1;
+    if !body.starts_with("There are ") {
+        return None;
+    }
+    let names = body.split_once("players online:")?.1;
+    Some(
+        names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
 fn write_jvm_args(dir: &Path, memory_mb: u32) -> CoreResult<()> {
-    let path = dir.join("user_jvm_args.txt");
+    let path = dir.join(USER_JVM_ARGS);
     if !dir
         .join(if cfg!(windows) { "run.bat" } else { "run.sh" })
         .is_file()
@@ -927,6 +1091,95 @@ pause
             .args
             .iter()
             .any(|a| a.contains("server.jar")));
+    }
+
+    /// Regression: a hand-written `run.bat` that launches the real command
+    /// from a `.ps1` beside it left the server unstartable, because the only
+    /// place this app looked for the arguments was the script.
+    #[test]
+    fn a_run_script_that_delegates_still_finds_forges_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir
+            .path()
+            .join("libraries/net/minecraftforge/forge/1.20.1-47.4.10");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join(if cfg!(windows) {
+                "win_args.txt"
+            } else {
+                "unix_args.txt"
+            }),
+            b"",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("user_jvm_args.txt"), b"-Xmx2048M").unwrap();
+        std::fs::write(
+            dir.path().join(if cfg!(windows) { "run.bat" } else { "run.sh" }),
+            b"@echo off
+powershell -File \"%~dp0run_color.ps1\"
+",
+        )
+        .unwrap();
+
+        let plan = launch_plan(dir.path(), &ServerConfig::default()).unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "@user_jvm_args.txt".to_owned(),
+                format!(
+                    "@libraries/net/minecraftforge/forge/1.20.1-47.4.10/{}",
+                    if cfg!(windows) { "win_args.txt" } else { "unix_args.txt" }
+                ),
+                "nogui".to_owned(),
+            ]
+        );
+    }
+
+    /// Two builds in one folder after an upgrade: the newer one wins, and the
+    /// answer does not depend on what order the filesystem listed them in.
+    #[test]
+    fn the_newest_installed_forge_build_is_the_one_launched() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = if cfg!(windows) {
+            "win_args.txt"
+        } else {
+            "unix_args.txt"
+        };
+        for build in ["1.20.1-47.4.10", "1.20.1-47.2.0"] {
+            let path = dir
+                .path()
+                .join("libraries/net/minecraftforge/forge")
+                .join(build);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join(name), b"").unwrap();
+        }
+
+        let plan = launch_plan(dir.path(), &ServerConfig::default()).unwrap();
+        assert!(plan.args.iter().any(|a| a.contains("47.4.10")));
+        // No user_jvm_args.txt on disk, so nothing points the JVM at one.
+        assert!(!plan.args.iter().any(|a| a.contains("user_jvm_args")));
+    }
+
+    #[test]
+    fn list_output_replaces_the_roster_and_chat_cannot() {
+        let want = vec!["alice".to_owned(), "bob".to_owned()];
+        assert_eq!(
+            roster_from_list(
+                "[12:00:00] [Server thread/INFO]: There are 2 of a max of 20 players online: alice, bob"
+            ),
+            Some(want)
+        );
+        // No players at all is still an answer, and it must clear the roster.
+        assert_eq!(
+            roster_from_list("[12:00:00] [Server thread/INFO]: There are 0 of a max of 20 players online:"),
+            Some(vec![])
+        );
+        // Said in chat, by someone trying it on.
+        assert_eq!(
+            roster_from_list("[12:00:00] [Server thread/INFO]: <eve> There are 9 of a max of 20 players online: eve"),
+            None
+        );
+        assert_eq!(roster_from_list("[12:00:00] [Server thread/INFO]: bob joined the game"), None);
     }
 
     #[test]

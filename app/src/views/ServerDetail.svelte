@@ -12,6 +12,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
 
   import Button from "../lib/Button.svelte";
   import Icon from "../lib/Icon.svelte";
@@ -24,15 +25,23 @@
     deleteMod,
     deleteServer,
     consoleSince,
+    createBackup,
+    crashReport,
+    deleteBackup,
+    exportDiagnostics,
+    listBackups,
+    restoreBackup,
+    setModEnabled,
     getServerConfig,
-    getServerProperties,
+    listPlayers,
+    getProperties,
     listMods,
     listServers,
     onCoreEvent,
     openServerFolder,
     readServerFile,
+    saveProperties,
     saveServerConfig,
-    saveServerProperties,
     sendConsoleCommand,
     startServer,
     stopServer,
@@ -41,30 +50,34 @@
   import {
     errorMessage,
     isCoreError,
-    type Difficulty,
-    type Gamemode,
+    type Backup,
+    type CrashInfo,
+    type Fix,
     type LogLine,
     type ModFile,
+    type PropertyField,
+    type PropertyGroup,
     type ServerConfig,
     type ServerFile,
     type ServerId,
-    type ServerProperties,
     type ServerSummary,
   } from "../lib/types";
 
   let { id, back }: { id: ServerId; back: () => void } = $props();
 
-  const GAMEMODES: [Gamemode, string][] = [
-    ["survival", "生存"],
-    ["creative", "創造"],
-    ["adventure", "冒險"],
-    ["spectator", "旁觀"],
-  ];
-  const DIFFICULTIES: [Difficulty, string][] = [
-    ["peaceful", "和平"],
-    ["easy", "簡單"],
-    ["normal", "普通"],
-    ["hard", "困難"],
+  /** Left rail of the settings tab. The four groups come from the core's
+   *  table; the last two are this app's own, not part of the file. */
+  type Section = "general" | PropertyGroup | "mods" | "backups" | "files";
+
+  const SECTIONS: [Section, string][] = [
+    ["general", "一般"],
+    ["connection", "連線"],
+    ["gameplay", "玩法"],
+    ["world", "世界"],
+    ["advanced", "進階"],
+    ["mods", "模組"],
+    ["backups", "備份"],
+    ["files", "原始檔"],
   ];
 
   const FILES: [ServerFile, string, string][] = [
@@ -90,7 +103,19 @@
   let autoscroll = $state(true);
   let logEl = $state<HTMLDivElement>();
 
-  const visibleLines = $derived(lines.filter((l) => l.seq >= hideBefore));
+  /** Free-text filter over the console, case-insensitive. */
+  let find = $state("");
+  /** Hide everything below a warning. The severity is Minecraft's own tag,
+   *  read by `level` — this is a filter over that, not a second guess. */
+  let warnOnly = $state(false);
+
+  const visibleLines = $derived(
+    lines.filter((l) => {
+      if (l.seq < hideBefore) return false;
+      if (warnOnly && level(l) === "info") return false;
+      return find === "" || l.text.toLowerCase().includes(find.toLowerCase());
+    }),
+  );
 
   const online = $derived(server?.state.kind === "online");
   const isUp = $derived(server !== null && isActive(server.state));
@@ -114,8 +139,70 @@
 
   // ── settings tab ────────────────────────────────────────
   let config = $state<ServerConfig | null>(null);
-  let properties = $state<ServerProperties | null>(null);
   let name = $state("");
+  let section = $state<Section>("general");
+
+  /** Memory, in MB, as typed. Not a server.properties key — it lives in
+   *  `user_jvm_args.txt` as `-Xmx`, which the core keeps in sync with the
+   *  config. Kept as a string so a half-typed number is not clamped mid-edit. */
+  let memory = $state("");
+
+  /** Every server, to catch two of them claiming the same port. The check has
+   *  to look outside this page, so the whole list is kept rather than one. */
+  let all = $state<ServerSummary[]>([]);
+
+  /** Every key in the file, in the core's order. Never mutated in place — an
+   *  edit goes in `edits`, so what is on disk stays visible for comparison. */
+  let fields = $state<PropertyField[]>([]);
+
+  /**
+   * Pending changes, keyed exactly as the file keys them.
+   *
+   * Only what actually differs from disk lives here: `set` drops a key once
+   * it is typed back to its original value, which keeps the save a true diff
+   * and means "還原" has nothing to undo when nothing was changed.
+   */
+  let edits = $state<Record<string, string>>({});
+
+  const shown = $derived(fields.filter((f) => f.group === section));
+  const dirty = $derived(
+    Object.keys(edits).length > 0 ||
+      (name.trim() !== "" && name.trim() !== config?.name) ||
+      (memory !== "" && Number(memory) !== config?.memoryMb),
+  );
+
+  /** Below 512 MB no Forge server starts at all; above 64 GB the number is a
+   *  typo, and an -Xmx larger than the machine has makes the JVM refuse to
+   *  launch with a message nobody reads. */
+  const memoryBad = $derived(
+    memory !== "" && !(/^\d+$/.test(memory) && +memory >= 512 && +memory <= 65536),
+  );
+
+  /** The port as it would be saved, and who else already answers on it. */
+  const portClash = $derived.by(() => {
+    const field = fields.find((f) => f.key === "server-port");
+    if (!field) return null;
+    const port = Number(edits["server-port"] ?? field.value);
+    return all.find((s) => s.id !== id && s.port === port)?.name ?? null;
+  });
+
+  /** Numeric fields are typed as free text, so an empty or non-numeric box has
+   *  to block the save — `max-players=` would leave the server unstartable. */
+  const invalid = $derived(
+    memoryBad ||
+      fields.some(
+        (f) => f.kind === "int" && f.key in edits && !/^-?\d+$/.test(edits[f.key]),
+      ),
+  );
+
+  const valueOf = (f: PropertyField) => edits[f.key] ?? f.value;
+
+  function set(f: PropertyField, value: string) {
+    const next = { ...edits };
+    if (value === f.value) delete next[f.key];
+    else next[f.key] = value;
+    edits = next;
+  }
   let saving = $state(false);
   let saved = $state(false);
 
@@ -127,12 +214,178 @@
   let mods = $state<ModFile[]>([]);
   let modsBusy = $state(false);
 
+  let backups = $state<Backup[]>([]);
+  /** Set while a zip is being written or unpacked. Both can take a minute on
+   *  a large world, and both must not be startable twice. */
+  let backupBusy = $state(false);
+  let restoring = $state<string | null>(null);
+
+  const loadBackups = () =>
+    run(async () => {
+      backups = await listBackups(id);
+    });
+
+  async function backupNow() {
+    backupBusy = true;
+    await run(async () => {
+      await createBackup(id);
+      backups = await listBackups(id);
+    });
+    backupBusy = false;
+  }
+
+  async function restore(name: string) {
+    backupBusy = true;
+    restoring = null;
+    await run(async () => {
+      await restoreBackup(id, name);
+      backups = await listBackups(id);
+    });
+    backupBusy = false;
+  }
+
+  const removeBackup = (name: string) =>
+    run(async () => {
+      await deleteBackup(id, name);
+      backups = await listBackups(id);
+    });
+
+  /**
+   * Files hovering over the window, while the mods pane is the one showing.
+   *
+   * The drag events are the webview's, not this element's — the OS hands the
+   * drop to the window, so there is no DOM target to hang it on. Which means
+   * this has to gate on the pane itself being open, or a jar dropped while
+   * the console is showing would silently install.
+   */
+  let dropping = $state(false);
+
+  const modsPaneOpen = $derived(tab === "settings" && section === "mods");
+
+  async function dropMods(paths: string[]) {
+    const jars = paths.filter((p) => p.toLowerCase().endsWith(".jar"));
+    if (!jars.length || isUp) return;
+    modsBusy = true;
+    await run(async () => {
+      await addMods(id, jars);
+      mods = await listMods(id);
+    });
+    modsBusy = false;
+  }
+
+  const toggleMod = (mod: ModFile) =>
+    run(async () => {
+      await setModEnabled(id, mod.name, !mod.enabled);
+      mods = await listMods(id);
+    });
+
+  /** Where the last bundle was written, so the message can say. */
+  let exported = $state<string | null>(null);
+
+  const exportBundle = () =>
+    run(async () => {
+      exported = await exportDiagnostics(id);
+      await openServerFolder(id);
+    });
+
+  const dateOf = (secs: number) =>
+    new Date(secs * 1000).toLocaleString("zh-TW", {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+
   let confirmingDelete = $state(false);
 
   /** Set while a restart is waiting for the process to actually exit. The
    *  start half fires from the state event rather than a timer, because a
    *  modded world can take a minute to save and any fixed wait would be wrong. */
   let restarting = $state(false);
+
+  /**
+   * Why the last run ended, when it ended badly. Cleared on every start: a
+   * diagnosis left on screen while the server boots is describing the past.
+   */
+  let crash = $state<CrashInfo | null>(null);
+
+  const loadCrash = () =>
+    run(async () => {
+      crash = await crashReport(id);
+    });
+
+  /**
+   * The setting a diagnosis just sent us to, marked for a moment.
+   *
+   * Landing on the right tab is not the same as finding the right row: the
+   * advanced section is forty rows long, and "we moved you here" has to say
+   * where here is.
+   */
+  let highlight = $state<string | null>(null);
+
+  function focusRow(key: string) {
+    highlight = key;
+    // After the section swap has rendered; the element does not exist yet.
+    requestAnimationFrame(() =>
+      document
+        .getElementById(`row-${key}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" }),
+    );
+    setTimeout(() => (highlight = null), 2000);
+  }
+
+  /** Send the user to whatever fixes it. The core picked the destination; this
+   *  only knows how to get there. */
+  function applyFix(fix: Fix) {
+    if (fix.kind === "java") {
+      javaMajor = fix.major;
+      javaOpen = true;
+      return;
+    }
+    if (fix.kind === "eula") {
+      // No form for the EULA — it is accepted at install time. Someone who got
+      // here edited the file by hand, so hand them the file.
+      run(() => openServerFolder(id));
+      return;
+    }
+    tab = "settings";
+    if (fix.kind === "memory") {
+      section = "general";
+      focusRow("memory");
+    } else if (fix.kind === "port") {
+      section = "connection";
+      focusRow("server-port");
+    } else {
+      section = "mods";
+    }
+  }
+
+  /**
+   * Who is on the server right now.
+   *
+   * Kept from the core's `players` event, which carries the whole roster on
+   * every change. Seeded once on mount for a page opened mid-session.
+   */
+  let players = $state<string[]>([]);
+
+  const loadPlayers = () =>
+    run(async () => {
+      players = await listPlayers(id);
+    });
+
+  /** Every moderation action is a console command, so there is nothing to add
+   *  to the core for this — the server already understands all four. */
+  const moderate = (verb: string, who: string) =>
+    run(() => sendConsoleCommand(id, `${verb} ${who}`));
+
+  let banning = $state<string | null>(null);
+
+  /** What the button under a diagnosis should say. */
+  const FIX_LABEL: Record<Fix["kind"], string> = {
+    memory: "調高記憶體",
+    port: "改連接埠",
+    java: "下載對應的 Java",
+    mods: "檢查模組",
+    eula: "開啟伺服器資料夾",
+  };
 
   /** Set when a start was blocked for want of a JRE. */
   let javaMajor = $state<number | null>(null);
@@ -155,6 +408,7 @@
     try {
       await startServer(id);
       error = null;
+      crash = null;
     } catch (e) {
       if (isCoreError(e) && e.kind === "javaMissing") {
         javaMajor = e.major;
@@ -176,7 +430,8 @@
 
   const refresh = () =>
     run(async () => {
-      const found = (await listServers()).find((s) => s.id === id);
+      all = await listServers();
+      const found = all.find((s) => s.id === id);
       // The server was deleted from under us — nothing left to show.
       if (!found) return back();
       server = found;
@@ -186,8 +441,10 @@
   const loadSettings = () =>
     run(async () => {
       config = await getServerConfig(id);
-      properties = await getServerProperties(id);
+      fields = await getProperties(id);
+      edits = {};
       name = config.name;
+      memory = String(config.memoryMb);
     });
 
   const loadMods = () =>
@@ -260,15 +517,22 @@
   }
 
   async function saveSettings() {
-    if (!config || !properties || saving) return;
+    if (!config || saving || invalid) return;
     saving = true;
     try {
-      if (name.trim() && name.trim() !== config.name) {
-        await saveServerConfig(id, { ...config, name: name.trim() });
+      // Name and memory are both config, so one write covers them — and the
+      // core turns `memoryMb` back into the `-Xmx` line on disk.
+      const next = {
+        ...config,
+        name: name.trim() || config.name,
+        memoryMb: memory === "" ? config.memoryMb : Number(memory),
+      };
+      if (next.name !== config.name || next.memoryMb !== config.memoryMb) {
+        await saveServerConfig(id, next);
       }
       // Refused by the core while the server is running, and rightly so — it
       // would be overwritten on shutdown. The fields are disabled to match.
-      if (!isUp) await saveServerProperties(id, properties);
+      if (!isUp && Object.keys(edits).length) await saveProperties(id, edits);
       await loadSettings();
       error = null;
       saved = true;
@@ -290,18 +554,44 @@
     navigator.clipboard.writeText(visibleLines.map((l) => l.text).join("\n"));
 
   onMount(() => {
-    refresh();
+    // The roster is stitched together from join and leave lines, so it can
+    // drift. `list` is the server's own authoritative answer and the reply
+    // resets it — asked once, here, where a stale roster would be seen.
+    refresh().then(() => {
+      if (online) run(() => sendConsoleCommand(id, "list"));
+    });
+    loadBackups();
+    loadPlayers();
+    loadCrash();
     loadSettings();
     loadMods();
     reloadConsole();
 
+    // Tauri hands drag-and-drop to the whole webview; `unlistenDrop` is kept
+    // alongside the event subscription so both come off together.
+    const dropped = getCurrentWebview().onDragDropEvent((event) => {
+      if (!modsPaneOpen) {
+        dropping = false;
+        return;
+      }
+      if (event.payload.type === "over") dropping = true;
+      else if (event.payload.type === "drop") {
+        dropping = false;
+        dropMods(event.payload.paths);
+      } else dropping = false;
+    });
+
     const unlisten = onCoreEvent((event) => {
       if (event.type === "serversChanged") refresh();
+      if (event.type === "players" && event.id === id) players = event.names;
       if (event.type === "serverState" && event.id === id) {
         // Straight from the event; the refetch below only adds the live
         // counters, and the header must not lag behind on its own state.
         if (server) server = { ...server, state: event.state, light: event.light };
         refresh();
+        // The crash report only exists once the process is gone, so this is
+        // the earliest moment there is anything to read.
+        if (event.state.kind === "crashed") loadCrash();
         // Only a clean stop leads back to a start. A crash means the restart
         // already failed, and relaunching would loop on the same fault.
         if (restarting && (event.state.kind === "stopped" || event.state.kind === "crashed")) {
@@ -331,6 +621,7 @@
     return () => {
       clearInterval(tick);
       void unlisten.then((fn) => fn());
+      void dropped.then((fn) => fn());
     };
   });
 
@@ -392,29 +683,29 @@
 
   <div class="stats">
     <div class="stat">
-      <span class="k">線上玩家</span>
-      <span class="v tabular">{server?.playersOnline ?? "—"}<small>/ {server?.maxPlayers ?? "—"}</small></span>
+      <span class="k">Online players</span>
+      <span class="v tabular">{server?.players?.length ?? "—"}<small>/ {server?.maxPlayers ?? "—"}</small></span>
     </div>
     <div class="stat">
-      <span class="k">運行時間</span>
+      <span class="k">Server uptime</span>
       <span class="v tabular">{uptime === null ? "—" : formatUptime(uptime)}</span>
     </div>
     <div class="stat">
-      <span class="k">記憶體</span>
+      <span class="k">Memory</span>
       <span class="v tabular">{server ? formatMemory(server.memoryMb) : "—"}</span>
     </div>
     <div class="stat">
-      <span class="k">連接埠</span>
+      <span class="k">Port</span>
       <span class="v tabular">{server?.port ?? "—"}</span>
     </div>
   </div>
 
   <div class="tabs" role="tablist">
     <button role="tab" aria-selected={tab === "console"} onclick={() => (tab = "console")}>
-      主控台
+      Console
     </button>
     <button role="tab" aria-selected={tab === "settings"} onclick={() => (tab = "settings")}>
-      設定
+      Server setting
     </button>
   </div>
 
@@ -424,6 +715,56 @@
 
   {#if tab === "console"}
     <div class="console">
+      {#if crash && server?.state.kind === "crashed"}
+        <div class="crash">
+          <p class="crash-head">{crash.headline}</p>
+          <pre class="crash-detail">{crash.detail}</pre>
+          <div class="crash-acts">
+            {#if crash.fix}
+              <Button variant="primary" onclick={() => crash?.fix && applyFix(crash.fix)}>
+                {FIX_LABEL[crash.fix.kind]}
+              </Button>
+            {/if}
+            {#if crash.path}
+              <Button onclick={() => run(() => openServerFolder(id))}>開啟完整報告</Button>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
+      {#if online}
+        <div class="roster">
+          <span class="roster-head">
+            Online players
+            <span class="tabular">{players.length}</span>
+          </span>
+          {#if players.length === 0}
+            <span class="roster-empty">目前沒有人在線</span>
+          {:else}
+            <ul>
+              {#each players as who (who)}
+                <li>
+                  <span class="who">{who}</span>
+                  {#if banning === who}
+                    <button onclick={() => (banning = null)}>取消</button>
+                    <button
+                      class="danger-act"
+                      onclick={() => (moderate("ban", who), (banning = null))}
+                    >
+                      確定封鎖
+                    </button>
+                  {:else}
+                    <button onclick={() => moderate("op", who)}>給 OP</button>
+                    <button onclick={() => moderate("kick", who)}>踢出</button>
+                    <button class="danger-act" onclick={() => (banning = who)}>封鎖</button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+
       <div class="log-panel">
         <div class="log-bar">
           <span class="log-title">
@@ -431,6 +772,15 @@
             主控台輸出
           </span>
           <span class="log-tools">
+            <input
+              class="find"
+              bind:value={find}
+              placeholder="搜尋"
+              spellcheck="false"
+            />
+            <button class:on={warnOnly} onclick={() => (warnOnly = !warnOnly)}>
+              只看警告以上
+            </button>
             <button class:on={autoscroll} onclick={() => (autoscroll = !autoscroll)}>
               自動捲動
             </button>
@@ -468,178 +818,328 @@
     </div>
   {:else}
     <div class="settings">
-      <div class="cols">
-        <section class="card">
-          <h2>伺服器</h2>
+      <nav class="sections" aria-label="設定分區">
+        {#each SECTIONS as [key, label] (key)}
+          <button
+            class="section"
+            class:active={section === key}
+            aria-current={section === key ? "true" : undefined}
+            onclick={() => (section = key)}
+          >
+            {label}
+          </button>
+        {/each}
+      </nav>
 
-          <label class="field">
-            <span>顯示名稱</span>
-            <input bind:value={name} placeholder={config?.name ?? ""} />
-          </label>
+      <div class="body">
+        {#if section === "mods"}
+          <div class="pane-head">
+            <h2>模組</h2>
+            <span class="count tabular">{mods.length}</span>
+            <Button onclick={addModFiles} disabled={isUp || modsBusy}>
+              <Icon name="plus" size={15} />
+              新增模組
+            </Button>
+          </div>
 
-          <label class="field">
-            <span>MOTD</span>
-            <input
-              disabled={isUp}
-              value={properties?.motd ?? ""}
-              oninput={(e) => properties && (properties.motd = e.currentTarget.value)}
-            />
-          </label>
+          {#if isUp}
+            <p class="note">伺服器執行中。模組只在啟動時載入，要停止後才能變更。</p>
+          {:else}
+            <p class="note" class:dropping>
+              {dropping ? "放開就會加進來。" : "把 jar 檔拖進這個視窗也可以加入模組。"}
+            </p>
+          {/if}
 
-          <p class="files-hint">直接編輯原始檔（伺服器停止時才能存檔）</p>
+          {#if mods.length === 0}
+            <p class="note">
+              還沒有模組。加進來的 jar 會複製到伺服器的 <code>mods/</code> 資料夾。
+            </p>
+          {:else}
+            <ul class="mod-list">
+              {#each mods as mod (mod.name)}
+                <li class:off={!mod.enabled}>
+                  <span class="mod-name" title={mod.name}>{mod.name}</span>
+                  <span class="mod-size tabular">{formatBytes(mod.bytes)}</span>
+                  <button
+                    class="mod-toggle"
+                    class:on={mod.enabled}
+                    onclick={() => toggleMod(mod)}
+                    disabled={isUp}
+                    title={mod.enabled ? "停用（保留檔案）" : "啟用"}
+                  >
+                    {mod.enabled ? "啟用中" : "已停用"}
+                  </button>
+                  <button
+                    class="mod-remove"
+                    onclick={() => removeMod(mod.name)}
+                    disabled={isUp}
+                    aria-label="移除 {mod.name}"
+                  >
+                    <Icon name="trash" size={15} />
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          <div class="danger">
+            <span class="label">
+              <span class="name">刪除伺服器</span>
+              <small>
+                {server?.imported
+                  ? "只會從清單移除，資料夾與世界檔案留在原處。"
+                  : "移除這個伺服器與它的世界檔案，無法復原。"}
+              </small>
+            </span>
+            {#if confirmingDelete}
+              <span class="confirm">
+                <Button onclick={() => (confirmingDelete = false)}>取消</Button>
+                <Button danger onclick={remove}>確定刪除</Button>
+              </span>
+            {:else}
+              <Button danger disabled={isUp} onclick={() => (confirmingDelete = true)}>
+                刪除
+              </Button>
+            {/if}
+          </div>
+        {:else if section === "backups"}
+          <div class="pane-head">
+            <h2>備份</h2>
+            <span class="count tabular">{backups.length}</span>
+            <Button onclick={backupNow} disabled={isUp || backupBusy}>
+              <Icon name="plus" size={15} />
+              立即備份
+            </Button>
+          </div>
+
+          {#if isUp}
+            <p class="note">
+              伺服器執行中。世界檔案正在被寫入，現在複製會拷到寫到一半的狀態——先停止伺服器。
+            </p>
+          {:else}
+            <p class="note">
+              把世界資料夾壓成 zip 存在這個 app 的資料夾裡，不會寫進伺服器目錄。
+              手動備份保留最近 10 份，還原前自動存的那份不算在內也不會被刪。
+            </p>
+          {/if}
+
+          {#if backupBusy}
+            <p class="note">處理中……世界大的話要一兩分鐘。</p>
+          {/if}
+
+          {#if backups.length === 0}
+            <p class="note">還沒有備份。</p>
+          {:else}
+            <ul class="mod-list">
+              {#each backups as item (item.name)}
+                  <li>
+                  <span class="mod-name" title={item.name}>
+                    {dateOf(item.createdSecs)}
+                    {#if item.automatic}<span class="auto">還原前自動存</span>{/if}
+                  </span>
+                  <span class="mod-size tabular">{formatBytes(item.bytes)}</span>
+                  {#if restoring === item.name}
+                    <button onclick={() => (restoring = null)}>取消</button>
+                    <button class="mod-toggle on" onclick={() => restore(item.name)}>
+                      確定覆蓋世界
+                    </button>
+                  {:else}
+                    <button
+                      class="mod-toggle"
+                      onclick={() => (restoring = item.name)}
+                      disabled={isUp || backupBusy}
+                    >
+                      還原
+                    </button>
+                  {/if}
+                  <button
+                    class="mod-remove"
+                    onclick={() => removeBackup(item.name)}
+                    disabled={backupBusy}
+                    aria-label="刪除備份"
+                  >
+                    <Icon name="trash" size={15} />
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {:else if section === "files"}
+          <div class="pane-head">
+            <h2>原始檔</h2>
+          </div>
+          <p class="note">直接編輯檔案內容。伺服器停止時才能存檔。</p>
+          <button class="row file-row" onclick={exportBundle}>
+            <span class="label">
+              <span class="name">匯出診斷檔</span>
+              <small>
+                {exported
+                  ? `已寫出：${exported}`
+                  : "把主控台、Minecraft 的 log、當機報告、模組清單和設定壓成一個 zip，要問人時丟這個檔就好。不會上傳到任何地方。"}
+              </small>
+            </span>
+            <span class="control"><Icon name="download" size={15} /></span>
+          </button>
+
           {#each FILES as [which, filename, note] (which)}
-            <button class="file-row" onclick={() => openFile(which)}>
-              <span>
-                <strong>{filename}</strong>
+            <button class="row file-row" onclick={() => openFile(which)}>
+              <span class="label">
+                <span class="name mono">{filename}</span>
                 <small>{note}</small>
               </span>
-              <Icon name="pencil-line" size={15} />
+              <span class="control"><Icon name="pencil-line" size={15} /></span>
             </button>
           {/each}
-        </section>
-
-        <section class="card">
-          <h2>遊戲</h2>
-
-          <div class="pair">
-            <label class="field">
-              <span>遊戲模式</span>
-              <select
-                disabled={isUp}
-                value={properties?.gamemode}
-                onchange={(e) => properties && (properties.gamemode = e.currentTarget.value as Gamemode)}
-              >
-                {#each GAMEMODES as [value, label] (value)}
-                  <option {value}>{label}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="field">
-              <span>難度</span>
-              <select
-                disabled={isUp}
-                value={properties?.difficulty}
-                onchange={(e) => properties && (properties.difficulty = e.currentTarget.value as Difficulty)}
-              >
-                {#each DIFFICULTIES as [value, label] (value)}
-                  <option {value}>{label}</option>
-                {/each}
-              </select>
-            </label>
-          </div>
-
-          <div class="toggles">
-            <label class="toggle">
-              <span><strong>PVP</strong></span>
-              <input
-                type="checkbox"
-                disabled={isUp}
-                checked={properties?.pvp ?? true}
-                onchange={(e) => properties && (properties.pvp = e.currentTarget.checked)}
-              />
-            </label>
-            <label class="toggle">
-              <span>
-                <strong>正版驗證</strong>
-                <small>關閉後非正版帳號可加入</small>
+        {:else}
+          {#if section === "general"}
+            <label class="row">
+              <span class="label">
+                <span class="name">顯示名稱</span>
+                <small>只是這個 app 裡的名字，不會動到資料夾。</small>
               </span>
-              <input
-                type="checkbox"
-                disabled={isUp}
-                checked={properties?.onlineMode ?? true}
-                onchange={(e) => properties && (properties.onlineMode = e.currentTarget.checked)}
-              />
+              <span class="control">
+                <input bind:value={name} placeholder={config?.name ?? ""} />
+              </span>
             </label>
-            <label class="toggle">
-              <span><strong>白名單</strong></span>
-              <input
-                type="checkbox"
-                disabled={isUp}
-                checked={properties?.whiteList ?? false}
-                onchange={(e) => properties && (properties.whiteList = e.currentTarget.checked)}
-              />
-            </label>
-          </div>
-        </section>
-      </div>
 
-      <section class="card mods">
-        <div class="mods-head">
-          <h2>模組</h2>
-          <span class="mods-count tabular">{mods.length}</span>
-          <span class="mods-line"></span>
-          <Button onclick={addModFiles} disabled={isUp || modsBusy}>
-            <Icon name="plus" size={15} />
-            新增模組
-          </Button>
-        </div>
-
-        {#if isUp}
-          <p class="mods-note">伺服器執行中。模組只在啟動時載入，要停止後才能變更。</p>
-        {/if}
-
-        {#if mods.length === 0}
-          <p class="mods-empty">
-            還沒有模組。加進來的 jar 會複製到伺服器的 <code>mods/</code> 資料夾。
-          </p>
-        {:else}
-          <ul class="mod-list">
-            {#each mods as mod (mod.name)}
-              <li>
-                <span class="mod-name" title={mod.name}>{mod.name}</span>
-                <span class="mod-size tabular">{formatBytes(mod.bytes)}</span>
+            <div class="row">
+              <span class="label">
+                <span class="name">當機後自動重啟</span>
+                <small>
+                  只在可能有救的時候重試：缺前置模組、Java 版本不對這類問題會直接放棄，
+                  連續當機 3 次也會停手。決定會寫進主控台。
+                </small>
+              </span>
+              <span class="control">
                 <button
-                  class="mod-remove"
-                  onclick={() => removeMod(mod.name)}
-                  disabled={isUp}
-                  aria-label="移除 {mod.name}"
+                  class="bool"
+                  class:on={config?.restartOnCrash}
+                  onclick={() =>
+                    config &&
+                    run(async () => {
+                      await saveServerConfig(id, {
+                        ...config!,
+                        restartOnCrash: !config!.restartOnCrash,
+                      });
+                      await loadSettings();
+                    })}
                 >
-                  <Icon name="trash" size={15} />
+                  {config?.restartOnCrash ? "開" : "關"}
                 </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
+              </span>
+            </div>
 
-      <section class="danger">
-        <span>
-          <strong>刪除伺服器</strong>
-          <small>
-            {server?.imported
-              ? "只會從清單移除，資料夾與世界檔案留在原處。"
-              : "移除這個伺服器與它的世界檔案，無法復原。"}
-          </small>
-        </span>
-        {#if confirmingDelete}
-          <span class="confirm">
-            <Button onclick={() => (confirmingDelete = false)}>取消</Button>
-            <Button danger onclick={remove}>確定刪除</Button>
-          </span>
-        {:else}
-          <Button danger disabled={isUp} onclick={() => (confirmingDelete = true)}>
-            <Icon name="trash" size={14} />
-            刪除
-          </Button>
-        {/if}
-      </section>
-
-      <div class="save-row">
-        <span class="hint">
-          {#if saved}已儲存。{/if}
-          {#if isUp}
-            伺服器執行中，關閉時會覆寫 server.properties。請先停止再修改。
-          {:else}
-            連接埠與遊戲模式需要重新啟動伺服器才會生效。
+            <label
+              class="row"
+              id="row-memory"
+              class:flash={highlight === "memory"}
+              class:changed={memory !== "" && +memory !== config?.memoryMb}
+            >
+              <span class="label">
+                <span class="name">記憶體上限</span>
+                <code>-Xmx</code>
+                <small>
+                  {memoryBad
+                    ? "請填 512 到 65536 之間的整數（MB）。"
+                    : `${formatMemory(+memory || 0)}。裝了模組的伺服器建議 4096 以上，但不要超過這台電腦的實體記憶體。`}
+                </small>
+              </span>
+              <span class="control">
+                <input class="tabular" type="number" min="512" max="65536" bind:value={memory} />
+              </span>
+            </label>
           {/if}
-        </span>
-        <span class="save-buttons">
-          <Button onclick={loadSettings} disabled={saving}>還原</Button>
-          <Button variant="primary" onclick={saveSettings} disabled={saving || !properties}>
-            <Icon name="check" size={14} />
-            儲存
-          </Button>
-        </span>
+
+          {#each shown as field (field.key)}
+            <label
+              class="row"
+              id="row-{field.key}"
+              class:flash={highlight === field.key}
+              class:changed={field.key in edits}
+            >
+              <span class="label">
+                <span class="name">{field.label}</span>
+                <code>{field.key}</code>
+                {#if field.hint}<small>{field.hint}</small>{/if}
+              </span>
+              <span class="control">
+                {#if field.kind === "bool"}
+                  <button
+                    class="bool"
+                    class:on={valueOf(field) === "true"}
+                    disabled={isUp}
+                    onclick={() => set(field, valueOf(field) === "true" ? "false" : "true")}
+                  >
+                    {valueOf(field) === "true" ? "開" : "關"}
+                  </button>
+                {:else if field.kind === "enum"}
+                  <select
+                    disabled={isUp}
+                    value={valueOf(field)}
+                    onchange={(e) => set(field, e.currentTarget.value)}
+                  >
+                    {#each field.options as option (option.value)}
+                      <option value={option.value}>{option.label}</option>
+                    {/each}
+                    <!-- A value the file holds that this app has no name for
+                         still has to be selectable, or opening the page would
+                         silently rewrite it to whichever option came first. -->
+                    {#if !field.options.some((o) => o.value === valueOf(field))}
+                      <option value={valueOf(field)}>{valueOf(field)}</option>
+                    {/if}
+                  </select>
+                {:else if field.kind === "int"}
+                  <input
+                    class="tabular"
+                    type="number"
+                    min={field.min ?? undefined}
+                    max={field.max ?? undefined}
+                    disabled={isUp}
+                    value={valueOf(field)}
+                    oninput={(e) => set(field, e.currentTarget.value)}
+                  />
+                {:else}
+                  <input
+                    disabled={isUp}
+                    value={valueOf(field)}
+                    oninput={(e) => set(field, e.currentTarget.value)}
+                  />
+                {/if}
+              </span>
+            </label>
+
+            {#if field.key === "server-port" && portClash}
+              <p class="warn">「{portClash}」也用這個連接埠。兩座伺服器不能同時開在同一個埠。</p>
+            {/if}
+          {/each}
+
+          <div class="save-row">
+            <span class="hint">
+              {#if saved}
+                已儲存。
+              {:else if isUp}
+                伺服器執行中，關閉時會覆寫 server.properties。請先停止再修改。
+              {:else if invalid}
+                有欄位不是整數，先改好才能儲存。
+              {:else if dirty}
+                {Object.keys(edits).length} 項未儲存，重新啟動後生效。
+              {:else}
+                修改後重新啟動伺服器才會生效。
+              {/if}
+            </span>
+            <span class="save-buttons">
+              <Button onclick={loadSettings} disabled={saving || !dirty}>還原</Button>
+              <Button
+                variant="primary"
+                onclick={saveSettings}
+                disabled={saving || invalid || !dirty}
+              >
+                <Icon name="check" size={14} />
+                儲存
+              </Button>
+            </span>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -709,10 +1209,16 @@
     gap: 14px;
   }
 
+  /* A wordmark, not a heading. On a geometric face the authority comes from
+     the drawing — even stroke, circular bowls — and a heavy weight destroys
+     exactly that by thickening the monoline into a slab. Weight stays at 500
+     and the letters are pulled together instead; that tightening is what makes
+     a large geometric line read as set rather than merely enlarged. */
   h1 {
+    font-family: var(--font-display);
     font-size: var(--font-hero);
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    font-weight: 500;
+    letter-spacing: -0.02em;
   }
 
   .pill {
@@ -836,6 +1342,106 @@
     border-bottom-color: var(--accent);
   }
 
+  /* ── why it stopped ────────────────────────────────── */
+
+  /* The one place in this design that gets a tinted panel. It is not
+     decoration: it appears only after a failure, and it has to read as a
+     different kind of thing from the log it sits above. */
+  .crash {
+    padding: 14px 16px;
+    background: color-mix(in srgb, var(--error) 8%, transparent);
+    border-radius: var(--radius-card);
+  }
+
+  .crash-head {
+    color: var(--fg);
+    font-size: var(--font-body);
+    font-weight: 600;
+  }
+
+  .crash-detail {
+    margin-top: 8px;
+    max-height: 132px;
+    overflow: auto;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: var(--font-tiny);
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .crash-acts {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+  }
+
+  /* ── who is on ─────────────────────────────────────── */
+
+  .roster {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    padding-bottom: 4px;
+  }
+
+  .roster-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .roster-head .tabular {
+    color: var(--fg);
+  }
+
+  .roster-empty {
+    color: var(--faint);
+    font-size: var(--font-small);
+  }
+
+  .roster ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    list-style: none;
+  }
+
+  .roster li {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .who {
+    font-size: var(--font-body);
+  }
+
+  /* The actions stay quiet until the row is under the pointer: four verbs per
+     player, always lit, would out-shout the names they act on. */
+  .roster li button {
+    color: var(--faint);
+    font-size: var(--font-small);
+    opacity: 0;
+    transition: opacity 120ms var(--ease), color 120ms var(--ease);
+  }
+
+  .roster li:hover button,
+  .roster li button:focus-visible {
+    opacity: 1;
+  }
+
+  .roster li button:hover {
+    color: var(--fg);
+  }
+
+  .roster li button.danger-act:hover {
+    color: var(--error);
+  }
+
   /* ── console ───────────────────────────────────────── */
 
   .console {
@@ -873,6 +1479,24 @@
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+
+  /* Sized to the shortest useful query rather than to the space available:
+     it sits in a toolbar, and a wide box there reads as the main event. */
+  .find {
+    width: 128px;
+    height: 24px;
+    padding: 0 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--font-small);
+  }
+
+  .find:focus {
+    border-color: var(--accent);
   }
 
   .log-tools button {
@@ -983,227 +1607,225 @@
 
   /* ── settings ──────────────────────────────────────── */
 
+  /* A rail of section names beside one column of rows. Nothing is boxed: the
+     rows are separated by hairlines because a row genuinely ends there, and
+     the rail is separated by distance alone. */
   .settings {
+    flex: 1;
+    display: flex;
+    gap: 40px;
+    align-items: flex-start;
+    padding-bottom: 8px;
+  }
+
+  .sections {
+    width: 84px;
+    flex: none;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    padding-bottom: 4px;
+    gap: 2px;
+    /* Lines the first section name up with the first row's label rather than
+       with the row's box, which is 8px taller. */
+    padding-top: 10px;
   }
 
-  .cols {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 18px;
-    align-items: start;
+  .section {
+    height: 30px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border-left: 2px solid transparent;
+    margin-left: -2px;
+    color: var(--muted);
+    font-size: var(--font-body);
+    text-align: left;
+    transition: color 120ms var(--ease);
   }
 
-  .card {
+  .section:hover {
+    color: var(--fg);
+  }
+
+  .section.active {
+    border-left-color: var(--accent);
+    color: var(--fg);
+    font-weight: 500;
+  }
+
+  .body {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 18px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-card);
   }
 
-  .card h2 {
+  .pane-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 12px;
+  }
+
+  .pane-head h2 {
     font-size: var(--font-section);
     font-weight: 600;
   }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .field > span {
-    color: var(--muted);
+  .count {
+    flex: 1;
+    color: var(--faint);
     font-size: var(--font-small);
   }
 
-  .field input,
-  .field select {
-    height: 38px;
-    padding: 0 12px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-button);
-    color: var(--fg);
-    font-size: var(--font-body);
-  }
-
-  .field input,
-  .editor {
-    user-select: text;
-  }
-
-  .field input:disabled,
-  .field select:disabled,
-  .toggle input:disabled {
-    opacity: 0.5;
-  }
-
-  .field input:focus,
-  .field select:focus {
-    border-color: var(--accent);
-  }
-
-  .pair {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-  }
-
-  .files-hint {
-    margin-top: 2px;
+  .note {
+    padding: 6px 0 12px;
     color: var(--muted);
     font-size: var(--font-small);
+    line-height: 1.7;
   }
 
-  .file-row {
+  .note code {
+    font-family: var(--font-mono);
+    font-size: var(--font-tiny);
+  }
+
+  /* ── one setting ───────────────────────────────────── */
+
+  .row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 9px 12px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-button);
-    color: var(--muted);
+    gap: 24px;
+    min-height: 48px;
+    padding: 8px 0;
     text-align: left;
   }
 
-  .file-row:hover {
-    border-color: var(--accent);
-    color: var(--fg);
+  .row + .row {
+    border-top: 1px solid var(--border);
   }
 
-  .file-row strong,
-  .toggle strong,
-  .danger strong {
-    display: block;
+  /* Two seconds of tint, then gone. The only animated thing in the app, and it
+     exists because the alternative is the user hunting for the row we just
+     promised to take them to. */
+  .row.flash {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    transition: background-color 600ms var(--ease);
+  }
+
+  .label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .name {
     color: var(--fg);
     font-size: var(--font-body);
-    font-weight: 500;
   }
 
-  .file-row strong {
+  .name.mono {
     font-family: var(--font-mono);
     font-size: var(--font-small);
   }
 
-  .file-row small,
-  .toggle small,
-  .danger small {
-    color: var(--muted);
+  /* The raw key, under its Chinese name: the label is what you read, the key
+     is what you search for when a wiki page names it. */
+  .label code {
+    color: var(--faint);
+    font-family: var(--font-mono);
     font-size: var(--font-tiny);
   }
 
-  .toggles {
-    display: flex;
-    flex-direction: column;
+  .label small {
+    color: var(--muted);
+    font-size: var(--font-small);
   }
 
-  .toggle {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 44px;
-    padding: 6px 0;
-    border-top: 1px solid var(--border);
+  /* Unsaved rows mark themselves on the key, which is otherwise the quietest
+     thing in the row — enough to find them again, not enough to shout. */
+  .row.changed .label code {
+    color: var(--accent);
   }
 
-  .toggle:first-child {
-    border-top: none;
-  }
-
-  /* A checkbox restyled into a switch: the native control keeps the label
-     association, keyboard behaviour, and focus ring for free. */
-  .toggle input {
-    appearance: none;
+  .control {
     flex: none;
-    width: 39px;
-    height: 22px;
-    border-radius: var(--radius-pill);
-    background: var(--wash-2);
-    transition: background-color 140ms var(--ease);
+    width: 200px;
+    display: flex;
+    justify-content: flex-end;
+    color: var(--muted);
   }
 
-  .toggle input::after {
-    content: "";
-    display: block;
-    width: 16px;
-    height: 16px;
-    margin: 3px;
-    border-radius: 50%;
+  .control input,
+  .control select {
+    width: 100%;
+    height: var(--h-input);
+    padding: 0 10px;
     background: var(--surface);
-    box-shadow: var(--shadow);
-    transition: transform 140ms var(--ease);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--font-body);
   }
 
-  .toggle input:checked {
-    background: var(--accent);
+  .control input:focus,
+  .control select:focus {
+    border-color: var(--accent);
   }
 
-  .toggle input:checked::after {
-    transform: translateX(17px);
+  .control input:disabled,
+  .control select:disabled,
+  .bool:disabled {
+    color: var(--faint);
+    cursor: not-allowed;
+  }
+
+  /* Spinners steal 20px from a field whose range is already stated. */
+  .control input[type="number"]::-webkit-inner-spin-button {
+    appearance: none;
+  }
+
+  .bool {
+    min-width: 66px;
+    height: var(--h-control-sm);
+    padding: 0 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-button);
+    color: var(--muted);
+    font-size: var(--font-body);
+    transition: color 120ms var(--ease), border-color 120ms var(--ease);
+  }
+
+  .bool.on {
+    border-color: var(--fg);
+    color: var(--fg);
+  }
+
+  .file-row {
+    width: 100%;
+  }
+
+  .file-row:hover .name {
+    color: var(--accent);
   }
 
   /* ── mods ──────────────────────────────────────────── */
 
-  .mods-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .mods-count {
-    color: var(--muted);
-    font-size: var(--font-small);
-  }
-
-  /* Pushes the button to the right and draws the rule the header sits on. */
-  .mods-line {
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .mods-note,
-  .mods-empty {
-    color: var(--muted);
-    font-size: var(--font-small);
-    line-height: 1.6;
-  }
-
-  .mods-empty code {
-    font-family: var(--font-mono);
-    font-size: var(--font-tiny);
-  }
-
   .mod-list {
-    display: flex;
-    flex-direction: column;
     list-style: none;
-    /* A long mod list must not push the save row off the page. */
-    max-height: 260px;
-    overflow: auto;
   }
 
   .mod-list li {
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-height: 40px;
-    padding: 4px 0;
-    border-top: 1px solid var(--border);
+    gap: 14px;
+    height: 40px;
   }
 
-  .mod-list li:first-child {
-    border-top: none;
+  .mod-list li + li {
+    border-top: 1px solid var(--border);
   }
 
   .mod-name {
@@ -1222,16 +1844,45 @@
   }
 
   .mod-remove {
-    display: grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
+    color: var(--faint);
+  }
+
+  /* A disabled mod is still listed, just clearly not loading. */
+  .mod-list li.off .mod-name {
+    color: var(--faint);
+    text-decoration: line-through;
+  }
+
+  .note.dropping {
+    color: var(--accent);
+  }
+
+  .mod-toggle {
+    flex: none;
+    height: var(--h-control-sm);
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-button);
     color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .mod-toggle.on {
+    border-color: var(--fg);
+    color: var(--fg);
+  }
+
+  .mod-toggle:disabled {
+    opacity: 0.4;
+  }
+
+  .auto {
+    margin-left: 8px;
+    color: var(--faint);
+    font-size: var(--font-tiny);
   }
 
   .mod-remove:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--error) 12%, transparent);
     color: var(--error);
   }
 
@@ -1239,28 +1890,39 @@
     opacity: 0.4;
   }
 
+  /* ── delete ────────────────────────────────────────── */
+
   .danger {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
-    padding: 14px 18px;
-    background: color-mix(in srgb, var(--error) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--error) 22%, transparent);
-    border-radius: var(--radius-card);
+    gap: 24px;
+    margin-top: 28px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
   }
 
   .confirm {
     display: flex;
     gap: 10px;
-    flex: none;
+  }
+
+  /* ── save ──────────────────────────────────────────── */
+
+  /* Sits under the row it is about, indented past nothing — it belongs to the
+     row above, and a full-width line under a hairline reads as attached. */
+  .warn {
+    padding: 8px 0 10px;
+    color: var(--starting);
+    font-size: var(--font-small);
   }
 
   .save-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    gap: 20px;
+    margin-top: 22px;
   }
 
   .hint {

@@ -9,8 +9,12 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
+  import Guide from "./Guide.svelte";
   import Icon from "./Icon.svelte";
-  import { theme } from "./theme.svelte";
+  import { THEMES, theme } from "./theme.svelte";
+
+  let menuOpen = $state(false);
+  let guide = $state(false);
 
   /**
    * Resolved per click, not once at module load. `getCurrentWindow()` needs the
@@ -30,22 +34,55 @@
   }
 </script>
 
+<svelte:window onclick={() => (menuOpen = false)} />
+
 <header class="titlebar" data-tauri-drag-region>
   <span class="name" data-tauri-drag-region>Mc Server Manager</span>
 
   <div class="controls">
     <!--
-      Light ↔ dark only. Which light palette it returns to is whatever was last
-      chosen in Settings, so picking "claude" there is not undone by using this.
-      The icon shows the mode you would switch *to*.
+      The theme lives here rather than in Settings: it is a thing people flip
+      by feel, several times a day, and a preference you have to navigate to is
+      one you stop changing. The icon shows the palette in use, not the one you
+      would switch to — this is a menu, not a toggle.
     -->
-    <button
-      class="ctl"
-      onclick={() => theme.toggleMode()}
-      title={theme.isDark ? "切換至淺色主題" : "切換至深色主題"}
-      aria-label="切換深色或淺色主題"
-    >
-      <Icon name={theme.isDark ? "sun" : "moon"} size={15} />
+    <div class="theme">
+      <button
+        class="ctl"
+        onclick={(e) => (e.stopPropagation(), (menuOpen = !menuOpen))}
+        aria-expanded={menuOpen}
+        aria-haspopup="menu"
+        title="主題"
+        aria-label="主題"
+      >
+        <Icon name={theme.choice === "system" ? "contrast" : theme.isDark ? "moon" : "sun"} size={15} />
+      </button>
+
+      {#if menuOpen}
+        <div class="menu" role="menu">
+          {#each THEMES as option (option.name)}
+            <button
+              class="option"
+              class:active={theme.choice === option.name}
+              role="menuitemradio"
+              aria-checked={theme.choice === option.name}
+              onclick={() => (theme.set(option.name), (menuOpen = false))}
+            >
+              <Icon name={option.icon} size={15} />
+              {option.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+    <!--
+      Beside the theme for the same reason: both are about the app rather than
+      about any one page, and neither belongs to a destination in the rail.
+      The walkthrough also opens itself on a first launch — this is how you get
+      back to it afterwards.
+    -->
+    <button class="ctl" onclick={() => (guide = true)} title="使用說明" aria-label="使用說明">
+      <Icon name="help" size={15} />
     </button>
     <button
       class="ctl"
@@ -74,6 +111,8 @@
   </div>
 </header>
 
+<Guide bind:open={guide} />
+
 <style>
   .titlebar {
     height: var(--titlebar-height);
@@ -87,8 +126,17 @@
     border-radius: var(--radius-window) var(--radius-window) 0 0;
   }
 
+  /* The app's own name, so it gets the wordmark treatment the headings get —
+     at title-bar size that means the tracking and the weight, not the scale.
+     It stays quiet in colour: this is the strip you drag the window by, not a
+     place to shout. */
   .name {
-    font-size: var(--font-small);
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    /* Barely any: at 13px Comfortaa's round bowls are already close, and
+       pulling them further turns `rm` into one shape. */
+    letter-spacing: -0.005em;
     color: var(--muted);
     pointer-events: none;
   }
@@ -96,6 +144,49 @@
   .controls {
     display: flex;
     height: 100%;
+  }
+
+  .theme {
+    position: relative;
+    height: 100%;
+  }
+
+  .menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 20;
+    min-width: 168px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-modal);
+  }
+
+  .option {
+    height: var(--h-control);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-button);
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--font-body);
+    text-align: left;
+  }
+
+  .option:hover {
+    background: var(--wash);
+  }
+
+  .option.active {
+    background: var(--wash-2);
   }
 
   .ctl {

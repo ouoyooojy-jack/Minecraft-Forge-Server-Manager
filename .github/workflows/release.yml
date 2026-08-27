@@ -6,13 +6,14 @@
 # clients either never see the release or download one that reports the version
 # they already have.
 #
-# Produces, on a draft release:
+# Produces, on a published release:
 #   Mc Server Manager_<version>_x64-setup.exe      the installer
 #   Mc Server Manager_<version>_x64-setup.exe.sig  its signature
 #   latest.json                                    what the updater reads
 #
-# The release is a draft: publish it by hand once you have run the installer
-# yourself. Publishing is what makes every client show the mandatory prompt.
+# The release publishes immediately, so pushing a tag is what makes every
+# client show the mandatory update prompt. There is no staging step between the
+# tag and the users — check the build before you tag, not after.
 
 name: release
 
@@ -64,7 +65,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: ${{ github.ref_name }}
           releaseBody: ${{ github.event.head_commit.message }}
-          releaseDraft: true
+          releaseDraft: false
           # Writes latest.json next to the installer. The endpoint in
           # tauri.conf.json points at `releases/latest/download/latest.json`,
           # so this file is the whole update feed.

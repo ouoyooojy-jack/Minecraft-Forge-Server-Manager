@@ -21,9 +21,11 @@ import {
   type AgentSettings,
   type RemoteHost,
   type RemoteServer,
+  type PropertyField,
+  type Backup,
+  type CrashInfo,
   type ServerFile,
   type ServerId,
-  type ServerProperties,
   type ServerSummary,
 } from "./types";
 
@@ -59,13 +61,16 @@ export const saveServerConfig = (id: ServerId, config: ServerConfig) =>
 
 // ── server.properties + EULA ────────────────────────────────
 
-export const getServerProperties = (id: ServerId) =>
-  invoke<ServerProperties>("get_server_properties", { id });
+/** Every key in the file, plus the ones Minecraft writes by default. */
+export const getProperties = (id: ServerId) =>
+  invoke<PropertyField[]>("get_properties", { id });
 
-export const saveServerProperties = (
-  id: ServerId,
-  properties: ServerProperties,
-) => invoke<void>("save_server_properties", { id, properties });
+/**
+ * Write back only what changed, key by key — comments and keys this app has
+ * never heard of survive. Refused while the server is running.
+ */
+export const saveProperties = (id: ServerId, changes: Record<string, string>) =>
+  invoke<void>("save_properties", { id, changes });
 
 /** One editable file, verbatim. A file that does not exist yet reads as "". */
 export const readServerFile = (id: ServerId, file: ServerFile) =>
@@ -79,6 +84,20 @@ export const writeServerFile = (id: ServerId, file: ServerFile, text: string) =>
 /** Reveal the server folder in Explorer. */
 export const openServerFolder = (id: ServerId) =>
   invoke<void>("open_server_folder", { id });
+
+/** Who is connected. Empty unless the server is fully up. */
+export const listPlayers = (id: ServerId) =>
+  invoke<string[]>("list_players", { id });
+
+/**
+ * Why the server stopped, or `null` if it did not crash.
+ *
+ * Pulled on demand rather than pushed with the state change: it reads the
+ * crash report off disk, and a server that crashes with nobody watching should
+ * not pay for a diagnosis nobody sees.
+ */
+export const crashReport = (id: ServerId) =>
+  invoke<CrashInfo | null>("crash_report", { id });
 
 // ── console ─────────────────────────────────────────────────
 
@@ -117,6 +136,40 @@ export const addMods = (id: ServerId, paths: string[]) =>
 
 export const deleteMod = (id: ServerId, name: string) =>
   invoke<void>("delete_mod", { id, name });
+
+/** Take a mod out of the load order without losing the file — which is what
+ *  bisecting a mod conflict needs. Refused while the server is running. */
+export const setModEnabled = (id: ServerId, name: string, enabled: boolean) =>
+  invoke<void>("set_mod_enabled", { id, name, enabled });
+
+// ── backups ─────────────────────────────────────────────────
+
+/** Saved worlds for this server, newest first. */
+export const listBackups = (id: ServerId) =>
+  invoke<Backup[]>("list_backups", { id });
+
+/**
+ * Zip the world. Resolves with the file name written.
+ *
+ * Refused while the server is running: Minecraft writes region files on its
+ * own schedule, so a copy taken now would capture a save in progress.
+ */
+export const createBackup = (id: ServerId) =>
+  invoke<string>("create_backup", { id });
+
+/** Replace the world with a backup. The world being replaced is saved first. */
+export const restoreBackup = (id: ServerId, name: string) =>
+  invoke<void>("restore_backup", { id, name });
+
+export const deleteBackup = (id: ServerId, name: string) =>
+  invoke<void>("delete_backup", { id, name });
+
+/**
+ * Bundle the log, the crash report, the mod list and the config into one zip.
+ * Resolves with its path. Nothing is uploaded — the user decides who sees it.
+ */
+export const exportDiagnostics = (id: ServerId) =>
+  invoke<string>("export_diagnostics", { id });
 
 // ── remote hosts ────────────────────────────────────────────
 
@@ -209,6 +262,17 @@ export const listForgeVersions = (refresh = false) =>
  */
 export const downloadForge = (version: string) =>
   invoke<DownloadId>("download_forge", { version });
+
+// ── feedback ────────────────────────────────────────────────
+
+/**
+ * Open a pre-filled GitHub issue in the browser.
+ *
+ * The URL is built in the core, so the UI cannot name a destination. Nothing
+ * is sent — the user reads, edits and submits the page themselves, and no log
+ * leaves the machine unless they attach one.
+ */
+export const reportIssue = () => invoke<void>("report_issue");
 
 // ── events ──────────────────────────────────────────────────
 

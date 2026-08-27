@@ -1,6 +1,6 @@
 [package]
 name = "mc-server-manager"
-version = "0.1.1"
+version = "0.1.2"
 description = "Minecraft Forge server manager"
 edition = "2021"
 rust-version = "1.77"
@@ -19,7 +19,9 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: closing the window hides the app instead of killing the servers
+# it is supervising, so there has to be something left on screen to get back to.
+tauri = { version = "2", features = ["tray-icon"] }
 # Native folder picker for "import an existing server".
 tauri-plugin-dialog = "2"
 # In-app updates. default-features off drops the bundled rustls: the transfer
@@ -31,6 +33,10 @@ tauri-plugin-updater = { version = "2", default-features = false, features = [
 ] }
 # Only for the relaunch after an update installs.
 tauri-plugin-process = "2"
+# With the app living in the tray, launching it again must raise the window
+# that is already there. A second process would supervise its own copy of every
+# server and fight the first one for the ports.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

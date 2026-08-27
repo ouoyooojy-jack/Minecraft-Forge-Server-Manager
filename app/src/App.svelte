@@ -7,6 +7,7 @@
   router would put a history stack between the sidebar and the view for nothing.
 -->
 <script lang="ts">
+  import Guide from "./lib/Guide.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import Downloads from "./views/Downloads.svelte";
@@ -22,11 +23,21 @@
    *  rather than beside it: the rail still highlights 首頁, and leaving the
    *  page is a back button, not a fourth destination. */
   let detail = $state<ServerId | null>(null);
+
+  /** The walkthrough, on the first launch only. Keyed by a flag rather than by
+   *  "are there no servers yet", because someone who deleted their only server
+   *  is not a new user and should not be walked through it again. */
+  const GUIDE_SEEN = "guide.seen";
+  let guide = $state(localStorage.getItem(GUIDE_SEEN) !== "1");
+  $effect(() => {
+    if (!guide) localStorage.setItem(GUIDE_SEEN, "1");
+  });
 </script>
 
 <!-- Outside the window frame: it is modal over everything, including the
      title bar, and it must not depend on which page is showing. -->
 <UpdatePrompt />
+<Guide bind:open={guide} />
 
 <div class="window">
   <TitleBar />

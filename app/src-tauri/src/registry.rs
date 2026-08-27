@@ -13,12 +13,14 @@
 //! server folder in gets a working server, and a crash can never desync a
 //! manifest from what is actually on disk.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::properties::{self, PropertyField};
 use crate::types::{
-    is_installed, CoreError, CoreResult, Difficulty, Gamemode, ModFile, RawProperties,
-    ServerConfig, ServerFile, ServerId, ServerProperties, ServerState, ServerSummary,
+    is_installed, CoreError, CoreResult, ModFile, RawProperties, ServerConfig, ServerFile,
+    ServerId, ServerState, ServerSummary,
 };
 
 const MANAGER_FILE: &str = "manager.json";
@@ -91,7 +93,7 @@ impl Registry {
                 imported: config.external_path.is_some(),
                 // Filled in by the caller, which is the only thing that can see
                 // the supervisor.
-                players_online: None,
+                players: None,
                 uptime_secs: None,
                 id,
             });
@@ -237,36 +239,31 @@ impl Registry {
         Ok(parse_properties(&text))
     }
 
-    /// The typed subset the settings modal edits. Missing or unparseable keys
-    /// fall back to Minecraft's own defaults rather than failing the whole read.
-    pub fn read_properties(&self, id: &ServerId) -> CoreResult<ServerProperties> {
-        let raw = self.read_raw_properties(id)?;
-        let d = ServerProperties::default();
-        Ok(ServerProperties {
-            motd: raw.get("motd").cloned().unwrap_or(d.motd),
-            port: parse_or(&raw, "server-port", d.port),
-            max_players: parse_or(&raw, "max-players", d.max_players),
-            gamemode: raw
-                .get("gamemode")
-                .and_then(|v| parse_gamemode(v))
-                .unwrap_or(d.gamemode),
-            difficulty: raw
-                .get("difficulty")
-                .and_then(|v| parse_difficulty(v))
-                .unwrap_or(d.difficulty),
-            pvp: parse_or(&raw, "pvp", d.pvp),
-            online_mode: parse_or(&raw, "online-mode", d.online_mode),
-            view_distance: parse_or(&raw, "view-distance", d.view_distance),
-            white_list: parse_or(&raw, "white-list", d.white_list),
-        })
+    /// Every editable line of `server.properties`, in display order.
+    pub fn property_fields(&self, id: &ServerId) -> CoreResult<Vec<PropertyField>> {
+        Ok(properties::fields(&self.read_raw_properties(id)?))
     }
 
-    /// Merge the typed subset back in, touching only those keys.
+    /// Merge edited keys back in, touching only the keys given.
     ///
-    /// Every other line — comments, the timestamp header, the ~50 keys we do
-    /// not model — is copied through byte-for-byte. Rewriting the file from our
-    /// struct would silently reset settings the user edited by hand.
-    pub fn write_properties(&self, id: &ServerId, props: &ServerProperties) -> CoreResult<()> {
+    /// Every other line — comments, the timestamp header, the keys the user did
+    /// not change — is copied through byte-for-byte. Rewriting the file from a
+    /// struct would silently reset settings edited by hand.
+    pub fn write_property_fields(
+        &self,
+        id: &ServerId,
+        changes: &BTreeMap<String, String>,
+    ) -> CoreResult<()> {
+        // The values crossed the IPC boundary: a newline would append a second,
+        // unrelated setting, and an `=` in a key would rewrite a different one.
+        for (key, value) in changes {
+            if !properties::is_writable_key(key) || !properties::is_writable_value(value) {
+                return Err(CoreError::Precondition {
+                    message: format!("設定 {key} 的內容無效。"),
+                });
+            }
+        }
+
         let dir = self.dir_of(id);
         fs::create_dir_all(&dir)?;
         let path = dir.join(PROPERTIES_FILE);
@@ -276,18 +273,10 @@ impl Registry {
             String::new()
         };
 
-        let updates: Vec<(&str, String)> = vec![
-            ("motd", props.motd.clone()),
-            ("server-port", props.port.to_string()),
-            ("max-players", props.max_players.to_string()),
-            ("gamemode", gamemode_str(props.gamemode).into()),
-            ("difficulty", difficulty_str(props.difficulty).into()),
-            ("pvp", props.pvp.to_string()),
-            ("online-mode", props.online_mode.to_string()),
-            ("view-distance", props.view_distance.to_string()),
-            ("white-list", props.white_list.to_string()),
-        ];
-
+        let updates: Vec<(&str, String)> = changes
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         write_atomic(&path, merge_properties(&existing, &updates).as_bytes())
     }
 
@@ -346,18 +335,46 @@ impl Registry {
         let mut out: Vec<ModFile> = entries
             .filter_map(Result::ok)
             .filter_map(|e| {
-                let name = e.file_name().to_str()?.to_owned();
+                let raw = e.file_name().to_str()?.to_owned();
+                let enabled = raw.to_lowercase().ends_with(".jar");
+                let name = if enabled {
+                    raw.clone()
+                } else {
+                    // `foo.jar.disabled` is listed as `foo.jar`, switched off.
+                    raw.strip_suffix(DISABLED_SUFFIX)?.to_owned()
+                };
                 if !name.to_lowercase().ends_with(".jar") {
                     return None;
                 }
                 Some(ModFile {
                     bytes: e.metadata().ok()?.len(),
                     name,
+                    enabled,
                 })
             })
             .collect();
         out.sort_by_key(|m| m.name.to_lowercase());
         Ok(out)
+    }
+
+    /// Turn a mod off or on by renaming it.
+    ///
+    /// Bisecting a mod conflict means taking mods out and putting them back,
+    /// and deleting is a bad way to do that — the jar is gone, and finding
+    /// that exact build again is its own afternoon. Forge only loads `*.jar`,
+    /// so a suffix is all it takes.
+    pub fn set_mod_enabled(&self, id: &ServerId, name: &str, enabled: bool) -> CoreResult<()> {
+        let dir = self.dir_of(id).join(MODS_DIR);
+        let jar = dir.join(safe_mod_name(name)?);
+        let off = dir.join(format!("{}{DISABLED_SUFFIX}", safe_mod_name(name)?));
+
+        let (from, to) = if enabled { (&off, &jar) } else { (&jar, &off) };
+        if !from.is_file() {
+            // Already in the state asked for; nothing to do and nothing wrong.
+            return Ok(());
+        }
+        fs::rename(from, to)?;
+        Ok(())
     }
 
     /// Copy a jar in, overwriting a file of the same name.
@@ -392,7 +409,11 @@ impl Registry {
 
     pub fn delete_mod(&self, id: &ServerId, name: &str) -> CoreResult<()> {
         let dir = self.dir_of(id).join(MODS_DIR);
-        fs::remove_file(dir.join(safe_mod_name(name)?))?;
+        let jar = dir.join(safe_mod_name(name)?);
+        // A disabled mod is listed under its enabled name, so deleting one has
+        // to look for the suffixed file too.
+        let off = jar.with_file_name(format!("{}{DISABLED_SUFFIX}", safe_mod_name(name)?));
+        fs::remove_file(if jar.is_file() { jar } else { off })?;
         Ok(())
     }
 
@@ -483,6 +504,9 @@ fn merge_properties(existing: &str, updates: &[(&str, String)]) -> String {
 /// The name crosses the IPC boundary, so it is checked here rather than
 /// trusted: a `..` or a separator in it would otherwise reach any file on disk
 /// through `remove_file`.
+/// What marks a mod as switched off. Forge loads `*.jar` and nothing else.
+const DISABLED_SUFFIX: &str = ".disabled";
+
 fn safe_mod_name(name: &str) -> CoreResult<&str> {
     let rejected = name.is_empty()
         || name.contains(['/', '\\', ':'])
@@ -511,50 +535,6 @@ fn parse_xmx_mb(text: &str) -> Option<u32> {
             };
             Some(digits.parse::<u32>().ok()?.saturating_mul(scale))
         })
-}
-
-fn parse_or<T: std::str::FromStr>(raw: &RawProperties, key: &str, fallback: T) -> T {
-    raw.get(key)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(fallback)
-}
-
-fn parse_gamemode(v: &str) -> Option<Gamemode> {
-    Some(match v.trim().to_lowercase().as_str() {
-        "survival" | "0" => Gamemode::Survival,
-        "creative" | "1" => Gamemode::Creative,
-        "adventure" | "2" => Gamemode::Adventure,
-        "spectator" | "3" => Gamemode::Spectator,
-        _ => return None,
-    })
-}
-
-fn parse_difficulty(v: &str) -> Option<Difficulty> {
-    Some(match v.trim().to_lowercase().as_str() {
-        "peaceful" | "0" => Difficulty::Peaceful,
-        "easy" | "1" => Difficulty::Easy,
-        "normal" | "2" => Difficulty::Normal,
-        "hard" | "3" => Difficulty::Hard,
-        _ => return None,
-    })
-}
-
-fn gamemode_str(g: Gamemode) -> &'static str {
-    match g {
-        Gamemode::Survival => "survival",
-        Gamemode::Creative => "creative",
-        Gamemode::Adventure => "adventure",
-        Gamemode::Spectator => "spectator",
-    }
-}
-
-fn difficulty_str(d: Difficulty) -> &'static str {
-    match d {
-        Difficulty::Peaceful => "peaceful",
-        Difficulty::Easy => "easy",
-        Difficulty::Normal => "normal",
-        Difficulty::Hard => "hard",
-    }
 }
 
 #[cfg(test)]
@@ -637,6 +617,35 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_mod_keeps_its_name_and_can_still_be_deleted() {
+        let (tmp, reg) = temp_registry();
+        let id = reg.create("Server").unwrap();
+        let jar = tmp.path().join("JEI-1.20.1.jar");
+        fs::write(&jar, b"jar").unwrap();
+        reg.add_mod(&id, &jar).unwrap();
+
+        reg.set_mod_enabled(&id, "JEI-1.20.1.jar", false).unwrap();
+        let listed = reg.list_mods(&id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "JEI-1.20.1.jar", "listed under its real name");
+        assert!(!listed[0].enabled);
+        assert!(
+            !reg.dir_of(&id).join("mods/JEI-1.20.1.jar").exists(),
+            "Forge must not see it"
+        );
+
+        // Asking for a state it is already in is not an error.
+        reg.set_mod_enabled(&id, "JEI-1.20.1.jar", false).unwrap();
+
+        reg.set_mod_enabled(&id, "JEI-1.20.1.jar", true).unwrap();
+        assert!(reg.list_mods(&id).unwrap()[0].enabled);
+
+        reg.set_mod_enabled(&id, "JEI-1.20.1.jar", false).unwrap();
+        reg.delete_mod(&id, "JEI-1.20.1.jar").unwrap();
+        assert!(reg.list_mods(&id).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_file_that_does_not_exist_reads_as_empty() {
         let (_tmp, reg) = temp_registry();
         let id = reg.create("Server").unwrap();
@@ -680,17 +689,17 @@ mod tests {
         let id = reg.create("S").unwrap();
         fs::write(
             reg.dir_of(&id).join(PROPERTIES_FILE),
-            "#Minecraft server properties\n\
-             spawn-protection=16\n\
-             motd=old motd\n\
-             enable-rcon=false\n",
+            "#Minecraft server properties
+             spawn-protection=16
+             motd=old motd
+             enable-rcon=false
+",
         )
         .unwrap();
 
-        let mut props = reg.read_properties(&id).unwrap();
-        assert_eq!(props.motd, "old motd");
-        props.motd = "new motd".into();
-        reg.write_properties(&id, &props).unwrap();
+        let mut changes = BTreeMap::new();
+        changes.insert("motd".to_owned(), "new motd".to_owned());
+        reg.write_property_fields(&id, &changes).unwrap();
 
         let text = fs::read_to_string(reg.dir_of(&id).join(PROPERTIES_FILE)).unwrap();
         assert!(text.contains("#Minecraft server properties"));
@@ -700,19 +709,38 @@ mod tests {
         assert!(!text.contains("old motd"));
     }
 
+    /// The file is the source of truth, including for keys this app has no row
+    /// for — those come back as editable text rather than being dropped.
     #[test]
-    fn numeric_gamemode_and_difficulty_are_understood() {
+    fn fields_carry_the_files_values_and_its_unknown_keys() {
         let (_tmp, reg) = temp_registry();
         let id = reg.create("S").unwrap();
         fs::write(
             reg.dir_of(&id).join(PROPERTIES_FILE),
-            "gamemode=1\ndifficulty=3\n",
+            "motd=hello
+some-mod-setting=42
+",
         )
         .unwrap();
 
-        let props = reg.read_properties(&id).unwrap();
-        assert_eq!(props.gamemode, Gamemode::Creative);
-        assert_eq!(props.difficulty, Difficulty::Hard);
+        let fields = reg.property_fields(&id).unwrap();
+        assert_eq!(fields.iter().find(|f| f.key == "motd").unwrap().value, "hello");
+        let extra = fields.iter().find(|f| f.key == "some-mod-setting").unwrap();
+        assert!(!extra.known);
+        assert_eq!(extra.value, "42");
+    }
+
+    #[test]
+    fn a_value_with_a_newline_is_refused() {
+        let (_tmp, reg) = temp_registry();
+        let id = reg.create("S").unwrap();
+
+        let mut changes = BTreeMap::new();
+        // Appending a second setting through a value is the whole reason this
+        // is checked in the core rather than in the form.
+        changes.insert("motd".to_owned(), "hi
+op-permission-level=4".to_owned());
+        assert!(reg.write_property_fields(&id, &changes).is_err());
     }
 
     #[test]
@@ -770,7 +798,13 @@ mod tests {
             "importing must not copy the installation"
         );
         // Minecraft's own files are read through the external path.
-        assert_eq!(reg.read_properties(&id).unwrap().port, 25599);
+        let port = reg
+            .property_fields(&id)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.key == "server-port")
+            .unwrap();
+        assert_eq!(port.value, "25599");
     }
 
     #[test]

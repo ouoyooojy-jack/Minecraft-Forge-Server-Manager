@@ -204,7 +204,7 @@
 <section class="page">
   <header>
     <div>
-      <h1>遠端</h1>
+      <h1>Remote</h1>
       <p class="sub">編輯別台電腦上的伺服器設定檔。</p>
     </div>
     <Button variant="primary" onclick={openAdd}>
@@ -304,7 +304,7 @@
         class:active={draft.transport === "app"}
         onclick={() => ((draft.transport = "app"), (draft.port = 47285))}
       >
-        對方也有這個 app
+        app直連
       </button>
       <button
         class:active={draft.transport === "ssh"}
@@ -428,10 +428,16 @@
     gap: 20px;
   }
 
+  /* A wordmark, not a heading. On a geometric face the authority comes from
+     the drawing — even stroke, circular bowls — and a heavy weight destroys
+     exactly that by thickening the monoline into a slab. Weight stays at 500
+     and the letters are pulled together instead; that tightening is what makes
+     a large geometric line read as set rather than merely enlarged. */
   h1 {
+    font-family: var(--font-display);
     font-size: var(--font-hero);
-    font-weight: 700;
-    letter-spacing: -0.01em;
+    font-weight: 500;
+    letter-spacing: -0.02em;
   }
 
   .sub {
@@ -599,7 +605,6 @@
     background: var(--surface);
     color: var(--fg);
     font-weight: 600;
-    box-shadow: var(--shadow);
   }
 
   .code {

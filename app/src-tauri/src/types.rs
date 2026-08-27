@@ -128,9 +128,12 @@ pub struct ServerSummary {
     pub max_players: Option<u32>,
     /// An installation adopted from elsewhere on disk rather than created here.
     pub imported: bool,
-    /// Connected players and seconds of uptime — `None` unless the server is
+    /// Who is connected, and seconds of uptime — `None` unless the server is
     /// running. Both come from the live process, not from disk.
-    pub players_online: Option<u32>,
+    ///
+    /// The names rather than a count: the count is the length, so the card and
+    /// the roster on the server page can never disagree about it.
+    pub players: Option<Vec<String>>,
     pub uptime_secs: Option<u64>,
 }
 
@@ -163,6 +166,13 @@ pub struct ServerConfig {
     /// put them, and deleting the server here only unlinks it.
     #[serde(default)]
     pub external_path: Option<PathBuf>,
+    /// Start the server again by itself after a crash.
+    ///
+    /// Off by default, and never blind: the restart is skipped for failures a
+    /// restart cannot fix (a missing mod dependency is still missing), and it
+    /// gives up after a few attempts rather than looping all night.
+    #[serde(default)]
+    pub restart_on_crash: bool,
 }
 
 impl Default for ServerConfig {
@@ -175,6 +185,7 @@ impl Default for ServerConfig {
             mc_version: None,
             forge_version: None,
             external_path: None,
+            restart_on_crash: false,
         }
     }
 }
@@ -259,59 +270,6 @@ pub struct RemoteHost {
     /// transport only — over `App` the other side names its own servers.
     #[serde(default)]
     pub dir: String,
-}
-
-/// The subset of `server.properties` the settings modal exposes.
-///
-/// Reads pull these keys out of the file; writes merge them back in place,
-/// leaving the ~60 keys we don't model untouched. Never rewrite the whole file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerProperties {
-    pub motd: String,
-    pub port: u16,
-    pub max_players: u32,
-    pub gamemode: Gamemode,
-    pub difficulty: Difficulty,
-    pub pvp: bool,
-    /// `online-mode`. Off means cracked clients can join.
-    pub online_mode: bool,
-    pub view_distance: u32,
-    pub white_list: bool,
-}
-
-impl Default for ServerProperties {
-    fn default() -> Self {
-        Self {
-            motd: "A Minecraft Server".into(),
-            port: 25565,
-            max_players: 20,
-            gamemode: Gamemode::Survival,
-            difficulty: Difficulty::Easy,
-            pvp: true,
-            online_mode: true,
-            view_distance: 10,
-            white_list: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Gamemode {
-    Survival,
-    Creative,
-    Adventure,
-    Spectator,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Difficulty {
-    Peaceful,
-    Easy,
-    Normal,
-    Hard,
 }
 
 /// Raw `server.properties` contents, key order preserved for round-tripping.
@@ -415,8 +373,15 @@ pub struct DownloadedFile {
 pub struct ModFile {
     /// File name, which is also the handle for deleting it — the core resolves
     /// it against the server's own `mods/` and nothing else.
+    ///
+    /// Always the enabled spelling, without the `.disabled` suffix, so that
+    /// toggling a mod off and on again does not change how it is addressed.
     pub name: String,
     pub bytes: u64,
+    /// Forge loads `*.jar` and ignores anything else, so a disabled mod is the
+    /// same file with `.disabled` on the end. Deleting is not the only way to
+    /// take a mod out of a load order you are bisecting.
+    pub enabled: bool,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -482,6 +447,10 @@ pub enum CoreEvent {
     ServerLog { id: ServerId, lines: Vec<LogLine> },
     /// A server was created, renamed, or deleted; the card grid should refetch.
     ServersChanged,
+    /// Who is connected, in full, whenever it changes. Sent as the whole
+    /// roster rather than a join/leave delta so a page that opened halfway
+    /// through a session cannot be permanently out of step.
+    Players { id: ServerId, names: Vec<String> },
     /// Download progress, throttled.
     Download(DownloadProgress),
     /// Somebody connected to this machine's remote-access listener. Shown as a

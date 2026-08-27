@@ -9,118 +9,260 @@
  * without Mica still looks deliberate rather than see-through.
  */
 
-:root {
-  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui,
-    "Microsoft JhengHei", "Noto Sans TC", sans-serif;
-  --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+/*
+ * jf open 粉圓, bundled — every Chinese character in the app.
+ *
+ * Round-terminal gothic: strokes finish in a curve, counters run open, the
+ * weight sits high in the frame. That is the same vocabulary as Comfortaa, and
+ * it is why this font and not a neutral one — a round Latin beside a
+ * conventional Chinese gothic reads as two decisions, not one.
+ *
+ * Drawn in Taiwan by justfont, so the character shapes are the Traditional
+ * ones. Noto Sans TC would have cost twice as much and carried a few forms
+ * that lean Japanese or Simplified.
+ *
+ * 2.04 MB, the whole face — 11,988 glyphs, not a common-character subset.
+ * Server names, MOTDs and player names are typed by the user, so no subset
+ * covers what they might enter, and a missing character falls back to the
+ * system gothic as one visibly different word.
+ *
+ * One weight only. See `font-synthesis` on `body`.
+ *
+ * Licence: SIL Open Font License 1.1.
+ */
+@font-face {
+  font-family: "Huninn";
+  src: url("./assets/fonts/huninn.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
 
-  --font-hero: 30px;
+/*
+ * Comfortaa, bundled — headings and the app's own name, nothing else.
+ *
+ * Two faces because a wordmark and a settings row are different jobs. The
+ * letterforms here are drawn unusually on purpose — the `g` finishes in a full
+ * hook, the `r` curls rather than turning a corner, the counters are wide —
+ * and that is exactly what makes a name memorable at 36px and exhausting at
+ * 13px. So it is scoped to `--font-display` and never reaches body text.
+ *
+ * 23 KB, Latin only, one variable file across the weight range.
+ *
+ * Licence: SIL Open Font License 1.1.
+ */
+@font-face {
+  font-family: "Comfortaa";
+  src: url("./assets/fonts/comfortaa-latin.woff2") format("woff2");
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * Outfit, bundled — Latin only.
+ *
+ * Geometric and monoline: circular bowls, even stroke weight, terminals cut
+ * clean rather than flared. Picked against the Instagram wordmark as the
+ * reference — the same construction, which is what makes it read as designed
+ * rather than as a default.
+ *
+ * 32 KB, the Google Fonts Latin subset, and one variable file covering the
+ * whole weight range this app uses. Chinese is deliberately not in here: a CJK
+ * face is megabytes, the system already has one, and a geometric Latin sits
+ * beside a system gothic without either one looking out of place.
+ *
+ * `font-family` resolves per character, so Latin and digits come from Outfit
+ * and Chinese comes from whatever the machine has. That fallthrough is the
+ * design, not a compromise.
+ *
+ * Licence: SIL Open Font License 1.1.
+ */
+@font-face {
+  font-family: "Outfit";
+  src: url("./assets/fonts/outfit-latin.woff2") format("woff2");
+  /* Real weights across the range — no synthesis, no faux bold. */
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*
+ * IBM Plex Mono, and only in the console.
+ *
+ * Log output is aligned by column — timestamps, levels, the `key=value` lines
+ * of server.properties. A proportional face there would tilt every column.
+ * Plex Mono is a grotesque rather than a geometric, which is the point: machine
+ * output should not look like it was set by the same hand as the interface.
+ */
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("./assets/fonts/plex-mono-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  /* Latin from the bundled Outfit, Chinese from the bundled 粉圓. Both are
+     shipped, so every machine renders the same thing; the system faces behind
+     them cover a character neither file carries, and are not the plan. */
+  --font-sans: "Outfit", "Huninn", "Noto Sans TC", "Microsoft JhengHei UI",
+    "Microsoft JhengHei", "Segoe UI", sans-serif;
+
+  /* Headings and the app's name only. Comfortaa is wide and round by
+     construction, so the heading rules pull it in with negative tracking —
+     less than Outfit needs, because these letters are already generous and
+     over-tightening collides the round bowls into each other.
+
+     Chinese falls through to the same system stack as the body: there is no
+     Chinese half of this face, and a heading that mixes them is still one
+     line of text. */
+  --font-display: "Comfortaa", "Huninn", "Noto Sans TC", "Microsoft JhengHei UI",
+    "Microsoft JhengHei", "Segoe UI", sans-serif;
+
+  /* Plex Mono, then Cascadia Mono — Mono, never Code. Cascadia Code ligates
+     `!=`, `->` and `>=` into single glyphs, and this app's monospace is where
+     the literal contents of server.properties and run.bat are shown. A file
+     that says `!=` must look like `!=`.
+
+     Chinese inside a monospace run falls through to the system face, which is
+     proportional — that is correct: a Chinese comment in server.properties is
+     prose, and only the keys and values need to line up. */
+  --font-mono: "IBM Plex Mono", "Cascadia Mono", Consolas, ui-monospace,
+    monospace;
+
+  --font-hero: 36px;
   --font-section: 16px;
   --font-body: 14px;
   --font-small: 12px;
   --font-tiny: 11px;
 
-  --radius-card: 16px;
-  --radius-button: 10px;
-  --radius-input: 10px;
+  /* Near-square. Rounding is a shape cue, and this design gets its
+     separation from type and space instead — the only round things left are
+     the status dots and the switch tracks, where the shape is the meaning. */
+  --radius-card: 4px;
+  --radius-button: 4px;
+  --radius-input: 4px;
   --radius-pill: 999px;
   --radius-window: 8px;
 
+  /* Control heights live here so a denser or roomier pass is a value change,
+     not a hunt through twelve component stylesheets. */
+  --h-control: 34px;
+  --h-control-sm: 30px;
+  --h-input: 34px;
+
   --gap-section: 24px;
   --gap-field: 12px;
-  --sidebar-width: 64px;
-  --sidebar-width-open: 190px;
+  /* A text rail: wide enough for four labels, narrow enough to ignore. */
+  --sidebar-width: 152px;
   --titlebar-height: 36px;
 
   --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
-/* claude — warm paper, terracotta */
+/* claude — paper and ink. One accent, spent only on the primary action. */
 :root,
 :root[data-theme="claude"] {
-  --bg: #faf9f7;
-  --rail: #f2efea;
+  --bg: #fbfaf8;
+  /* The rail carries no fill: it is separated by alignment, not by a slab. */
+  --rail: #fbfaf8;
   --surface: #ffffff;
-  --surface-2: #f4f1ec;
-  --border: #e6e1d9;
-  --fg: #23201c;
-  --muted: #8a837a;
-  --faint: #b3aba0;
-  --accent: #b4530a;
+  --surface-2: #f3f1ec;
+  --border: #e8e5df;
+  --fg: #1c1b19;
+  --muted: #6f6b64;
+  --faint: #a5a099;
+  --accent: #a04f14;
   --accent-fg: #ffffff;
 
-  --online: #2f7a55;
-  --starting: #9a6700;
-  --error: #b42318;
-  --offline: #8a837a;
+  --online: #2f6b4f;
+  --starting: #8a6a00;
+  --error: #b3261e;
+  --offline: #a5a099;
 
-  --bg-veil: rgb(250 249 247 / 90%);
-  --rail-veil: rgb(242 239 234 / 80%);
-  --surface-veil: rgb(255 255 255 / 88%);
+  --bg-veil: rgb(251 250 248 / 92%);
+  --rail-veil: rgb(251 250 248 / 92%);
+  --surface-veil: #ffffff;
 
-  --shadow: 0 1px 2px rgb(60 45 30 / 5%), 0 10px 28px rgb(60 45 30 / 6%);
-  --shadow-hi: 0 2px 6px rgb(60 45 30 / 7%), 0 18px 44px rgb(60 45 30 / 10%);
-  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 70%);
-  --wash: rgb(35 32 28 / 5%);
-  --wash-2: rgb(35 32 28 / 9%);
+  /* Elevation is reserved for things that genuinely float above the page.
+     A modal does; a list row does not. */
+  --shadow: none;
+  --shadow-hi: none;
+  --edge-highlight: none;
+  --shadow-modal: 0 24px 64px rgb(28 27 25 / 16%);
+  --wash: rgb(28 27 25 / 4%);
+  --wash-2: rgb(28 27 25 / 8%);
 }
 
-/* light — neutral, cool */
+/* light — cool neutral. Same structure, colder ink. */
 :root[data-theme="light"] {
-  --bg: #f7f8f9;
-  --rail: #eef0f3;
+  --bg: #fcfcfd;
+  --rail: #fcfcfd;
   --surface: #ffffff;
-  --surface-2: #f2f4f6;
-  --border: #e3e6ea;
-  --fg: #16181c;
-  --muted: #6b7280;
-  --faint: #9ca3af;
-  --accent: #16181c;
+  --surface-2: #f2f3f5;
+  --border: #e6e7ea;
+  --fg: #17181a;
+  --muted: #6b7076;
+  --faint: #9aa0a6;
+  --accent: #1e2022;
   --accent-fg: #ffffff;
 
-  --online: #16794c;
-  --starting: #92640b;
-  --error: #c2312a;
-  --offline: #6b7280;
+  --online: #1f7a4d;
+  --starting: #8a6a00;
+  --error: #b3261e;
+  --offline: #9aa0a6;
 
-  --bg-veil: rgb(247 248 249 / 90%);
-  --rail-veil: rgb(238 240 243 / 80%);
-  --surface-veil: rgb(255 255 255 / 88%);
+  --bg-veil: rgb(252 252 253 / 92%);
+  --rail-veil: rgb(252 252 253 / 92%);
+  --surface-veil: #ffffff;
 
-  --shadow: 0 1px 2px rgb(16 24 40 / 5%), 0 10px 28px rgb(16 24 40 / 5%);
-  --shadow-hi: 0 2px 6px rgb(16 24 40 / 7%), 0 18px 44px rgb(16 24 40 / 9%);
-  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 80%);
-  --wash: rgb(22 24 28 / 5%);
-  --wash-2: rgb(22 24 28 / 9%);
+  --shadow: none;
+  --shadow-hi: none;
+  --edge-highlight: none;
+  --shadow-modal: 0 24px 64px rgb(23 24 26 / 16%);
+  --wash: rgb(23 24 26 / 4%);
+  --wash-2: rgb(23 24 26 / 8%);
 }
 
-/* dark — neutral, near-black */
+/* dark — the same page, unlit. */
 :root[data-theme="dark"] {
-  --bg: #131316;
-  --rail: #0e0e11;
-  --surface: #1b1b20;
-  --surface-2: #232329;
-  --border: #2b2b32;
-  --fg: #ededf0;
-  --muted: #93939e;
-  --faint: #63636e;
-  --accent: #e8e8ec;
-  --accent-fg: #131316;
+  --bg: #141416;
+  --rail: #141416;
+  --surface: #1c1c20;
+  --surface-2: #202024;
+  --border: #2a2a2f;
+  --fg: #e9e9ec;
+  --muted: #9a9aa2;
+  --faint: #6a6a72;
+  --accent: #e6e6ea;
+  --accent-fg: #141416;
 
-  --online: #3fb950;
-  --starting: #d29922;
-  --error: #f85149;
-  --offline: #7d8590;
+  --online: #4ea373;
+  --starting: #c9a227;
+  --error: #e5675e;
+  --offline: #6a6a72;
 
-  --bg-veil: rgb(19 19 22 / 88%);
-  --rail-veil: rgb(14 14 17 / 74%);
-  --surface-veil: rgb(27 27 32 / 84%);
+  --bg-veil: rgb(20 20 22 / 92%);
+  --rail-veil: rgb(20 20 22 / 92%);
+  --surface-veil: #1c1c20;
 
-  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 10px 28px rgb(0 0 0 / 26%);
-  --shadow-hi: 0 2px 6px rgb(0 0 0 / 44%), 0 18px 44px rgb(0 0 0 / 36%);
-  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 6%);
-  --wash: rgb(255 255 255 / 6%);
-  --wash-2: rgb(255 255 255 / 11%);
+  --shadow: none;
+  --shadow-hi: none;
+  --edge-highlight: none;
+  --shadow-modal: 0 24px 64px rgb(0 0 0 / 52%);
+  --wash: rgb(255 255 255 / 5%);
+  --wash-2: rgb(255 255 255 / 10%);
 }
 
 * {
@@ -141,6 +283,19 @@ body {
   font-family: var(--font-sans);
   font-size: var(--font-body);
   -webkit-font-smoothing: antialiased;
+
+  /* No faux bold. 粉圓 ships one weight, so every 500 and 600 in this app was
+     being thickened by the browser instead of drawn — and a synthesised stroke
+     does not match the real one, which is why some Chinese looked heavy and
+     some looked thin on the same screen.
+
+     Outfit and Comfortaa are unaffected: they carry real weights, so nothing
+     was ever being synthesised for them. This switches off the faking, not the
+     bolding — Latin still goes to 500 and 600, Chinese stays at the one weight
+     it actually has, and hierarchy comes from size and colour, which is what
+     the rest of this design already runs on. */
+  font-synthesis-weight: none;
+
 
   /* The app draws its own title bar; native text selection and the rubber-band
      overscroll both break that illusion. */

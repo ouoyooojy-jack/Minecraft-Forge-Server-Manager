@@ -165,7 +165,7 @@
       </div>
     {:else}
       <label class="field">
-        <span>Minecraft 版本</span>
+        <span>Minecraft version</span>
         <div class="select">
           <select
             value={major}
@@ -181,7 +181,7 @@
       </label>
 
       <label class="field">
-        <span>Forge 版本</span>
+        <span>Forge version</span>
         <div class="select wide">
           <select bind:value={version} disabled={loadingVersions || !versions.length}>
             {#each versions as v (v)}
@@ -302,11 +302,17 @@
     justify-content: space-between;
     gap: var(--gap-section);
   }
+  /* A wordmark, not a heading. On a geometric face the authority comes from
+     the drawing — even stroke, circular bowls — and a heavy weight destroys
+     exactly that by thickening the monoline into a slab. Weight stays at 500
+     and the letters are pulled together instead; that tightening is what makes
+     a large geometric line read as set rather than merely enlarged. */
   h1 {
     margin: 0;
+    font-family: var(--font-display);
     font-size: var(--font-hero);
-    font-weight: 600;
-    letter-spacing: -0.4px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
   }
   .sub {
     margin: 4px 0 0;

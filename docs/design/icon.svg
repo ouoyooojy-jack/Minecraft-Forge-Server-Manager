@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Mc Server Manager</title>
+  <rect width="512" height="512" rx="112" fill="#1c1b19"/>
+  <circle cx="126" cy="256" r="34" fill="#b4530a"/>
+  <rect x="194" y="198" width="204" height="44" rx="22" fill="#f7f5f1"/>
+  <rect x="194" y="286" width="132" height="36" rx="18" fill="#8f8a82"/>
+</svg>

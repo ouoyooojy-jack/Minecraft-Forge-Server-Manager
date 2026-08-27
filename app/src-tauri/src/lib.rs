@@ -5,10 +5,13 @@
 //! that does not import `tauri`, so it can be tested without a window.
 
 mod agent;
+mod backup;
+mod crash;
 mod download;
 mod forge;
 mod java;
 mod logbuf;
+mod properties;
 mod registry;
 mod remote;
 mod supervisor;
@@ -20,6 +23,7 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use agent::{Agent, AgentSettings};
@@ -31,13 +35,19 @@ use remote::Remotes;
 use supervisor::Supervisor;
 use types::{
     CoreError, CoreEvent, CoreResult, DownloadId, DownloadKind, ForgeVersionGroup, LogLine,
-    ServerConfig, ServerId, ServerProperties, ServerSummary, EVENT_CHANNEL,
+    ServerConfig, ServerId, ServerState, ServerSummary, EVENT_CHANNEL,
 };
 
 pub struct AppState {
     registry: Arc<Registry>,
     /// Owns every running process and the console history that outlives it.
-    supervisor: Supervisor,
+    ///
+    /// Shared rather than owned: the auto-restart path has to keep a handle
+    /// across an await, and a `State` borrow cannot cross one.
+    supervisor: Arc<Supervisor>,
+    /// Crashes in a row per server, for the auto-restart give-up rule. Cleared
+    /// the moment a server reaches `Online`.
+    restart_counts: std::sync::Mutex<std::collections::HashMap<ServerId, u32>>,
     downloader: Downloader,
     forge: Forge,
     /// Locates a JRE, and unpacks one when the machine has none.
@@ -58,9 +68,162 @@ pub struct AppState {
 /// that cannot be delivered (window closing) must not fail the operation that
 /// produced it.
 fn emit(app: &AppHandle, event: CoreEvent) {
+    // The tray is the only thing on screen while the window is hidden, so it
+    // has to carry the answer to "is anything still running?" by itself.
+    if matches!(
+        event,
+        CoreEvent::ServerState { .. } | CoreEvent::ServersChanged | CoreEvent::Players { .. }
+    ) {
+        refresh_tray_tooltip(app);
+    }
+    if let CoreEvent::ServerState { id, state, .. } = &event {
+        match state {
+            // A server that got all the way up is not in a crash loop.
+            ServerState::Online => {
+                app.state::<AppState>()
+                    .restart_counts
+                    .lock()
+                    .expect("restart mutex poisoned")
+                    .remove(id);
+            }
+            ServerState::Crashed { .. } => maybe_restart(app, id.clone()),
+            _ => {}
+        }
+    }
     if let Err(e) = app.emit(EVENT_CHANNEL, &event) {
         eprintln!("event emit failed: {e}");
     }
+}
+
+/// Wait this long before bringing a crashed server back.
+///
+/// Long enough for the port to be released and for a human watching the
+/// console to read what happened before it scrolls away.
+const RESTART_DELAY: Duration = Duration::from_secs(10);
+
+/// Give up after this many crashes in a row.
+const RESTART_LIMIT: u32 = 3;
+
+/// Start a crashed server again, if that could possibly help.
+///
+/// Two guards, and both matter more than the feature does. A restart cannot
+/// fix a missing mod dependency, the wrong Java, an unaccepted EULA, or a port
+/// somebody else is holding — those fail identically forever, so the
+/// diagnosis decides whether to bother. And even for a fault that might be
+/// transient, a server that has crashed three times running is not going to
+/// come up on the fourth; it is going to do this all night.
+fn maybe_restart(app: &AppHandle, id: ServerId) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let prepared = {
+            let state = app.state::<AppState>();
+            let Ok(config) = state.registry.load_config(&id) else {
+                return;
+            };
+            if !config.restart_on_crash {
+                return;
+            }
+
+            // Ask the same diagnosis the UI shows. A fault with a fix the user
+            // has to apply is not one to retry.
+            let log: Vec<String> = state
+                .supervisor
+                .console_since(&id, 0)
+                .into_iter()
+                .map(|l| l.text)
+                .collect();
+            let info = crash::diagnose(
+                &state.registry.dir_of(&id),
+                &log,
+                None,
+                state
+                    .supervisor
+                    .launched_at(&id)
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            );
+            if info.fix.is_some() {
+                announce(&app, &id, format!("不自動重啟：{}", info.headline));
+                return;
+            }
+
+            let tries = {
+                let mut counts = state
+                    .restart_counts
+                    .lock()
+                    .expect("restart mutex poisoned");
+                let n = counts.entry(id.clone()).or_insert(0);
+                *n += 1;
+                *n
+            };
+            if tries > RESTART_LIMIT {
+                announce(
+                    &app,
+                    &id,
+                    format!("已連續當機 {RESTART_LIMIT} 次，停止自動重啟。"),
+                );
+                return;
+            }
+
+            let Ok(config) = resolve_java(&state, &config, config.mc_version.as_deref()) else {
+                return;
+            };
+            (
+                Arc::clone(&state.supervisor),
+                state.registry.dir_of(&id),
+                config,
+                tries,
+            )
+        };
+        let (supervisor, dir, config, tries) = prepared;
+
+        announce(
+            &app,
+            &id,
+            format!("當機，{} 秒後自動重啟（第 {tries} 次）。", RESTART_DELAY.as_secs()),
+        );
+        tokio::time::sleep(RESTART_DELAY).await;
+
+        if let Err(error) = supervisor.start(&id, &dir, &config).await {
+            emit(
+                &app,
+                CoreEvent::Error {
+                    id: Some(id),
+                    error,
+                },
+            );
+        }
+    });
+}
+
+/// Put a line in the server's own console, so the decision is visible where
+/// the crash is rather than in a toast nobody was looking at.
+fn announce(app: &AppHandle, id: &ServerId, text: String) {
+    app.state::<AppState>().supervisor.note(id, text);
+}
+
+/// Name what is running, in the tray tooltip.
+fn refresh_tray_tooltip(app: &AppHandle) {
+    let Some(tray) = app.tray_by_id("main") else {
+        return;
+    };
+    let state = app.state::<AppState>();
+
+    let running: Vec<String> = state
+        .registry
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| state.supervisor.is_active(&s.id))
+        .map(|s| s.name)
+        .collect();
+
+    let _ = tray.set_tooltip(Some(match running.len() {
+        0 => "Mc Server Manager".to_owned(),
+        // Naming them is the point; past a handful the list stops fitting and
+        // stops being read, so it collapses to a count.
+        1..=3 => format!("執行中：{}", running.join("、")),
+        n => format!("{n} 座伺服器執行中"),
+    }));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -80,7 +243,7 @@ fn list_servers(state: State<'_, AppState>) -> CoreResult<Vec<ServerSummary>> {
         server.light = server.state.light();
         if let Some((uptime, players)) = state.supervisor.stats(&server.id) {
             server.uptime_secs = Some(uptime);
-            server.players_online = Some(players);
+            server.players = Some(players);
         }
     }
     Ok(servers)
@@ -211,27 +374,33 @@ fn save_server_config(
 // Commands — server.properties and EULA
 // ─────────────────────────────────────────────────────────────
 
+/// Every editable line of `server.properties`, with the control each needs.
 #[tauri::command]
-fn get_server_properties(state: State<'_, AppState>, id: ServerId) -> CoreResult<ServerProperties> {
-    state.registry.read_properties(&id)
+fn get_properties(
+    state: State<'_, AppState>,
+    id: ServerId,
+) -> CoreResult<Vec<properties::PropertyField>> {
+    state.registry.property_fields(&id)
 }
 
+/// Write back only the keys that changed.
+///
+/// Refused while the server is running for the same reason the raw editor is:
+/// Minecraft holds the file in memory and rewrites it on shutdown, so an edit
+/// made now would vanish when the server stops.
 #[tauri::command]
-fn save_server_properties(
+fn save_properties(
     app: AppHandle,
     state: State<'_, AppState>,
     id: ServerId,
-    properties: ServerProperties,
+    changes: std::collections::BTreeMap<String, String>,
 ) -> CoreResult<()> {
-    // Same reason `write_server_file` refuses: Minecraft holds the file in
-    // memory and rewrites it on shutdown, so a save now would vanish when the
-    // server stops. Refusing beats accepting an edit that silently disappears.
     if state.supervisor.is_active(&id) {
         return Err(CoreError::Precondition {
             message: "伺服器執行中，設定會在關閉時被覆寫。請先停止伺服器再修改。".into(),
         });
     }
-    state.registry.write_properties(&id, &properties)?;
+    state.registry.write_property_fields(&id, &changes)?;
     // The card reads port and max players from this file.
     emit(&app, CoreEvent::ServersChanged);
     Ok(())
@@ -592,8 +761,345 @@ async fn start_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()
             message: "請先同意 Minecraft EULA。".into(),
         });
     }
+    port_is_free(&state, &id)?;
     let config = resolve_java(&state, &config, config.mc_version.as_deref())?;
     state.supervisor.start(&id, &dir, &config).await
+}
+
+/// Refuse a start that is going to fail on the port.
+///
+/// Minecraft's own failure here is a `BindException` two hundred lines into
+/// the log, after which the process exits and the server reads as "crashed" —
+/// which is a terrible way to learn that the other server is already using
+/// 25565. Binding it ourselves for a moment answers the question up front.
+///
+/// A server with no `server-port` line yet gets the benefit of the doubt: the
+/// file is written on first run, and refusing to start it would be worse than
+/// letting Minecraft report the collision itself.
+fn port_is_free(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<()> {
+    let Some(port) = state
+        .registry
+        .read_raw_properties(id)?
+        .get("server-port")
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
+    else {
+        return Ok(());
+    };
+
+    match std::net::TcpListener::bind(("0.0.0.0", port)) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(CoreError::Precondition {
+            message: format!(
+                "連接埠 {port} 已被占用。可能是另一座伺服器正在執行，或有別的程式在用這個埠。"
+            ),
+        }),
+        // Anything else — no permission, a strange adapter — is not something
+        // to block a start over. Minecraft will say so if it matters.
+        Err(_) => Ok(()),
+    }
+}
+
+/// How many hand-made backups to keep per server before the oldest is dropped.
+///
+/// A world runs to hundreds of megabytes and this button is one click, so an
+/// unbounded store fills a disk without ever saying so. Copies taken
+/// automatically before a restore are outside this count.
+const KEEP_BACKUPS: usize = 10;
+
+/// Where a server's world folder is. `level-name` names it; `world` is the
+/// default Minecraft writes, and the only name most servers ever have.
+fn world_dir(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<std::path::PathBuf> {
+    let level = state
+        .registry
+        .read_raw_properties(id)?
+        .get("level-name")
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty() && !v.contains(['/', '\\', ':']) && !v.contains(".."))
+        .unwrap_or_else(|| "world".to_owned());
+    Ok(state.registry.dir_of(id).join(level))
+}
+
+/// Backups live under the app's own metadata for this server, never inside the
+/// server folder — see `backup.rs`.
+fn backup_store(state: &State<'_, AppState>, id: &ServerId) -> std::path::PathBuf {
+    state.registry.meta_dir(id).join("backups")
+}
+
+#[tauri::command]
+fn list_backups(state: State<'_, AppState>, id: ServerId) -> CoreResult<Vec<backup::Backup>> {
+    backup::list(&backup_store(&state, &id))
+}
+
+/// Zip the world. Refused while the server is running: Minecraft holds region
+/// files open and writes them on its own schedule, so a copy taken now would
+/// be a snapshot of a save in progress — which is exactly the corruption this
+/// is here to recover from.
+#[tauri::command]
+async fn create_backup(state: State<'_, AppState>, id: ServerId) -> CoreResult<String> {
+    let (world, store) = {
+        if state.supervisor.is_active(&id) {
+            return Err(CoreError::Precondition {
+                message: "伺服器執行中，現在備份會拷到寫到一半的世界。請先停止伺服器。".into(),
+            });
+        }
+        (world_dir(&state, &id)?, backup_store(&state, &id))
+    };
+
+    // A world is big enough that zipping it on the UI thread would freeze the
+    // window for a minute.
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::create(&world, &store, KEEP_BACKUPS, "world-")
+    })
+    .await
+    .map_err(|e| CoreError::Io {
+        message: format!("備份失敗：{e}"),
+    })?
+}
+
+/// Replace the world with a backup. The world being replaced is saved first.
+#[tauri::command]
+async fn restore_backup(state: State<'_, AppState>, id: ServerId, name: String) -> CoreResult<()> {
+    let (world, store) = {
+        if state.supervisor.is_active(&id) {
+            return Err(CoreError::Precondition {
+                message: "伺服器執行中，無法還原世界。請先停止伺服器。".into(),
+            });
+        }
+        (world_dir(&state, &id)?, backup_store(&state, &id))
+    };
+
+    tauri::async_runtime::spawn_blocking(move || backup::restore(&world, &store, &name))
+        .await
+        .map_err(|e| CoreError::Io {
+            message: format!("還原失敗：{e}"),
+        })?
+}
+
+#[tauri::command]
+fn delete_backup(state: State<'_, AppState>, id: ServerId, name: String) -> CoreResult<()> {
+    backup::delete(&backup_store(&state, &id), &name)
+}
+
+/// Turn a mod off without deleting it, or back on.
+#[tauri::command]
+fn set_mod_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: ServerId,
+    name: String,
+    enabled: bool,
+) -> CoreResult<()> {
+    if state.supervisor.is_active(&id) {
+        return Err(CoreError::Precondition {
+            message: "伺服器執行中。模組只在啟動時載入，要停止後才能變更。".into(),
+        });
+    }
+    state.registry.set_mod_enabled(&id, &name, enabled)?;
+    emit(&app, CoreEvent::ServersChanged);
+    Ok(())
+}
+
+/// Everything someone would otherwise be asked to go and find, in one zip.
+///
+/// The alternative is a conversation: what does the log say, which mods, what
+/// version, can you paste the crash report. This collects all of it in one
+/// click so that asking for help is one file rather than six questions.
+///
+/// The log contains player names and, on a public server, addresses. It goes
+/// to a file the user then chooses to share or not — nothing is uploaded.
+#[tauri::command]
+fn export_diagnostics(state: State<'_, AppState>, id: ServerId) -> CoreResult<String> {
+    let dir = state.registry.dir_of(&id);
+    let config = state.registry.load_config(&id)?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+
+    let mut summary = format!(
+        "server: {}\nid: {}\nminecraft: {}\nforge: {}\nmemory_mb: {}\njava: {}\nimported: {}\napp: {}\n",
+        config.name,
+        id.0,
+        config.mc_version.as_deref().unwrap_or("?"),
+        config.forge_version.as_deref().unwrap_or("?"),
+        config.memory_mb,
+        config
+            .java_path
+            .as_deref()
+            .map_or("(PATH)".into(), |p| p.to_string_lossy().into_owned()),
+        config.external_path.is_some(),
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    if let Ok(mods) = state.registry.list_mods(&id) {
+        summary.push_str(&format!("\nmods ({}):\n", mods.len()));
+        for m in mods {
+            summary.push_str(&format!(
+                "  {} {} ({} bytes)\n",
+                if m.enabled { "[on ]" } else { "[off]" },
+                m.name,
+                m.bytes
+            ));
+        }
+    }
+    files.push(("summary.txt".into(), summary.into_bytes()));
+
+    // The three editable files, whichever of them exist.
+    for file in [
+        types::ServerFile::Properties,
+        types::ServerFile::JvmArgs,
+        types::ServerFile::RunScript,
+    ] {
+        if let Ok(text) = state.registry.read_file(&id, file) {
+            files.push((file.filename().to_owned(), text.into_bytes()));
+        }
+    }
+
+    if let Ok(bytes) = std::fs::read(dir.join("logs/latest.log")) {
+        files.push(("latest.log".into(), bytes));
+    }
+    // Plus the console this app itself captured, which covers a failure that
+    // happened before Minecraft opened its own log.
+    files.push((
+        "console.txt".into(),
+        state
+            .supervisor
+            .console_since(&id, 0)
+            .into_iter()
+            .map(|l| l.text)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes(),
+    ));
+
+    if let Some(report) = newest_crash_report(&dir) {
+        files.push(("crash-report.txt".into(), report));
+    }
+
+    let out = state
+        .downloads_dir
+        .join(format!("診斷-{}-{}.zip", id.0, now_stamp()));
+    backup::zip_blobs(&files, &out)?;
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// The most recent crash report, whenever it was written. Unlike the
+/// diagnosis, this bundle is not about one run — an old report is still the
+/// most useful thing in the folder.
+fn newest_crash_report(dir: &std::path::Path) -> Option<Vec<u8>> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir.join("crash-reports")).ok()?.flatten() {
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().map_or(true, |(t, _)| modified > *t) {
+            best = Some((modified, entry.path()));
+        }
+    }
+    std::fs::read(best?.1).ok()
+}
+
+fn now_stamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Commands — feedback
+// ─────────────────────────────────────────────────────────────
+
+/// Where bugs and ideas go.
+const REPO: &str = "https://github.com/ouoyooojy-jack/Minecraft-Forge-Server-Manager";
+
+/// Open a pre-filled GitHub issue in the browser.
+///
+/// One entry point, not two. Whether something is a bug or a missing feature
+/// is a judgement the person reporting it should not have to make before they
+/// can start typing — plenty of reports are both, and picking the wrong door
+/// is a reason not to bother. The template asks which it is on the first line,
+/// where it can be changed after the fact.
+///
+/// Pre-filled because the follow-up questions are always the same ones, and an
+/// empty text box gets an empty answer.
+///
+/// Nothing is sent from here: this opens a page the user then reads, edits and
+/// submits themselves. Their log is not attached and never leaves the machine
+/// unless they attach the diagnostics bundle by hand.
+#[tauri::command]
+fn report_issue() -> CoreResult<()> {
+    let body = format!(
+        "### 這是\n- [ ] 問題／Bug\n- [ ] 建議\n\n\
+         ### 說明\n發生了什麼，或你想要什麼。\n\n\
+         ### 重現步驟（回報問題時填）\n1. \n2. \n3. \n\n\
+         ### 預期 / 實際\n\n\n\
+         ### 診斷檔（回報當機或啟動失敗時）\n\
+         伺服器頁 → 設定 → 原始檔 → 匯出診斷檔，把 zip 拖進這裡。\n\n\
+         ---\n程式版本：{}\n系統：Windows\n",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    // No title: the first thing the user types should be the summary, and a
+    // placeholder there is a placeholder that gets submitted.
+    let url = format!("{REPO}/issues/new?body={}", percent_encode(&body));
+    // Explorer hands an http(s) URL to the default browser, the same way it
+    // hands a path to a file manager.
+    std::process::Command::new("explorer").arg(&url).spawn()?;
+    Ok(())
+}
+
+/// Percent-encode everything that is not unreserved.
+///
+/// Deliberately aggressive: `&`, `#` and `=` inside a title would otherwise
+/// become query structure, and the whole point of building the URL in here is
+/// that its shape is not up for negotiation.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 3);
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Who is connected. Empty unless the server is fully up.
+///
+/// The roster is also pushed as a `Players` event on every change; this is the
+/// first read, for a page that opened mid-session.
+#[tauri::command]
+fn list_players(state: State<'_, AppState>, id: ServerId) -> Vec<String> {
+    state.supervisor.players(&id)
+}
+
+/// Why the server stopped, when it stopped on its own.
+///
+/// Read on demand rather than pushed with the state change: the diagnosis
+/// touches the disk, and a server that crashes while nobody is looking at its
+/// page should not pay for a crash report nobody reads.
+#[tauri::command]
+fn crash_report(state: State<'_, AppState>, id: ServerId) -> Option<crash::CrashInfo> {
+    let code = match state.supervisor.state(&id) {
+        types::ServerState::Crashed { code } => code,
+        _ => return None,
+    };
+    let log: Vec<String> = state
+        .supervisor
+        .console_since(&id, 0)
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+
+    Some(crash::diagnose(
+        &state.registry.dir_of(&id),
+        &log,
+        code,
+        state
+            .supervisor
+            .launched_at(&id)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    ))
 }
 
 /// Graceful shutdown. The world saves; a force-kill follows only if the server
@@ -692,8 +1198,141 @@ fn delete_download(state: State<'_, AppState>, path: PathBuf) -> CoreResult<()> 
 // ─────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// How long to wait for servers to shut down before giving up and exiting.
+///
+/// Longer than the supervisor's own 90-second grace period, because that clock
+/// starts when `stop` is sent and this one starts a moment earlier. A modded
+/// world can take a minute to save, and exiting out from under that is the
+/// exact data loss this whole path exists to prevent.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(100);
+
+/// Bring the window back from the tray and focus it.
+fn show_window(app: &AppHandle) {
+    use tauri::Manager as _;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The tray icon, which is what the app becomes while it is holding servers up.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "顯示視窗", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        "安全關閉並離開",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Mc Server Manager")
+        .menu(&menu)
+        // Left click raises the window; the menu is the right-click gesture,
+        // which is what every other tray icon on Windows does.
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_window(app),
+            "quit" => stop_everything_then_exit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// Closing the window with servers running hides the app instead of exiting.
+///
+/// Killing this process would leave every JVM it started orphaned: on Windows
+/// a child outlives its parent, so the servers would go on running with no
+/// console, no controls, and no way to stop them short of Task Manager - while
+/// still holding their ports. Hiding keeps the supervisor, the console
+/// buffers, and the stop button alive behind the tray icon.
+fn close_or_hide(window: &tauri::Window, api: &tauri::CloseRequestApi) {
+    use tauri::Manager as _;
+
+    let active = window.state::<AppState>().supervisor.active().len();
+    if active == 0 {
+        return; // nothing to protect; let the app exit normally
+    }
+
+    api.prevent_close();
+    let _ = window.hide();
+    warn_once_about_the_tray(window.app_handle(), active);
+}
+
+/// Say where the app went - once per run.
+///
+/// A window that vanishes reads as "quit", and someone who believes the app
+/// quit will not go looking for a tray icon to stop the server with.
+fn warn_once_about_the_tray(app: &AppHandle, active: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri_plugin_dialog::DialogExt as _;
+
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    if TOLD.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    app.dialog()
+        .message(format!(
+            "還有 {active} 座伺服器在執行，程式縮到系統匣繼續看著它們。\n\n要完全關閉，請在系統匣圖示按右鍵選「安全關閉並離開」——那會先安全關閉伺服器再結束。"
+        ))
+        .title("仍在背景執行")
+        .blocking_show();
+}
+
+/// The only exit that does not risk a world: stop everything, wait, then quit.
+fn stop_everything_then_exit(app: &AppHandle) {
+    use tauri::Manager as _;
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Each lookup is scoped so that no state guard is held across an await.
+        for id in app.state::<AppState>().supervisor.active() {
+            let _ = app.state::<AppState>().supervisor.stop(&id);
+        }
+
+        // ponytail: polling, because the supervisor has no "all stopped"
+        // signal and one 200ms tick during shutdown does not justify a
+        // broadcast channel. Swap it for one if anything else waits here.
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while std::time::Instant::now() < deadline {
+            if app.state::<AppState>().supervisor.active().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        app.exit(0);
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered first: it decides whether this process is the one
+        // that goes on to build a window at all.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         // The update flow is driven entirely from the UI: check on launch,
         // then a modal the user cannot dismiss until they take the update.
@@ -709,7 +1348,7 @@ pub fn run() {
             // owned handle rather than borrowing the one `setup` was given.
             let handle = app.handle().clone();
             let sink: types::EventSink = Arc::new(move |event| emit(&handle, event));
-            let supervisor = Supervisor::new(Arc::clone(&sink));
+            let supervisor = Arc::new(Supervisor::new(Arc::clone(&sink)));
             // Downloads are started from synchronous commands, which run off the
             // async runtime — the handle has to be handed over explicitly.
             let downloader = Downloader::new(sink, tauri::async_runtime::handle().inner().clone())?;
@@ -725,6 +1364,7 @@ pub fn run() {
                 java: Java::new(data_dir.join("java"))?,
                 remotes: Remotes::new(&data_dir)?,
                 running_agent: std::sync::Mutex::new(None),
+                restart_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
                 data_dir: data_dir.clone(),
                 downloads_dir,
             });
@@ -753,6 +1393,8 @@ pub fn run() {
                 }
             });
 
+            build_tray(app.handle())?;
+
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager as _;
@@ -765,6 +1407,11 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                close_or_hide(window, api);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_servers,
             create_server_from_installer,
@@ -772,8 +1419,8 @@ pub fn run() {
             delete_server,
             get_server_config,
             save_server_config,
-            get_server_properties,
-            save_server_properties,
+            get_properties,
+            save_properties,
             list_mods,
             add_mods,
             delete_mod,
@@ -796,6 +1443,15 @@ pub fn run() {
             open_server_folder,
             start_server,
             stop_server,
+            crash_report,
+            list_players,
+            list_backups,
+            create_backup,
+            restore_backup,
+            delete_backup,
+            set_mod_enabled,
+            export_diagnostics,
+            report_issue,
             send_console_command,
             cancel_download,
             list_downloads,

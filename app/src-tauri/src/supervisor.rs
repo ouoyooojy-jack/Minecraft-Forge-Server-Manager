@@ -45,6 +45,8 @@ enum Cmd {
     Send(String),
     /// Graceful shutdown: `stop` over stdin, force-kill after `STOP_GRACE`.
     Stop,
+    /// The user gave up waiting on `Stop`. Kills the process tree now.
+    Kill,
 }
 
 struct Running {
@@ -258,6 +260,12 @@ impl Supervisor {
         self.send_cmd(id, Cmd::Stop)
     }
 
+    /// Skip the rest of the grace period. Whatever the world had not saved
+    /// yet is lost, which is why the UI only offers this once `stop` is sent.
+    pub fn kill(&self, id: &ServerId) -> CoreResult<()> {
+        self.send_cmd(id, Cmd::Kill)
+    }
+
     /// Send a console command. Only meaningful once the server is `Online`;
     /// a booting server discards stdin it is not reading yet.
     pub fn send(&self, id: &ServerId, line: String) -> CoreResult<()> {
@@ -286,7 +294,7 @@ impl Supervisor {
             });
         };
         handle.tx.send(cmd).map_err(|_| CoreError::Process {
-            message: "server process is no longer accepting commands".into(),
+            message: "伺服器程序已經不接受指令。".into(),
         })
     }
 
@@ -408,6 +416,12 @@ impl Supervisor {
                                 let _ = stdin.flush().await;
                                 kill_at = Some(Instant::now() + STOP_GRACE);
                             }
+                            Cmd::Kill => {
+                                stop_requested = true;
+                                kill_at = None;
+                                set_state(&running, &emit, &id, ServerState::Stopping);
+                                force_kill(&mut child).await;
+                            }
                         }
                     }
 
@@ -433,8 +447,8 @@ impl Supervisor {
 
             if let ServerState::Crashed { code } = &final_state {
                 let text = match code {
-                    Some(c) => format!("process exited unexpectedly (code {c})"),
-                    None => "process was terminated".into(),
+                    Some(c) => format!("程序意外結束（代碼 {c}）"),
+                    None => "程序被終止".into(),
                 };
                 let stored = {
                     let mut logs = logs.lock().expect("log mutex poisoned");
@@ -707,7 +721,9 @@ fn player_event(text: &str) -> Option<(String, bool)> {
     // Chat is echoed to the log too, so a player can type "x joined the game"
     // and be counted. Requiring the server's own `]: ` prefix immediately
     // before the name keeps chat out, since chat lines carry `<name>` there.
-    let body = text.rsplit_once("]: ")?.1;
+    // The *first* `]: ` is the prefix; splitting at the last one would let a
+    // chat line that itself contains `]: ` pick where the body starts.
+    let body = text.split_once("]: ")?.1;
     let (name, rest) = body.split_once(' ')?;
     if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return None;
@@ -735,7 +751,7 @@ fn roster(running: &Arc<Mutex<HashMap<ServerId, Running>>>, id: &ServerId) -> Ve
 /// Matched on the log's own `]: ` prefix, the same guard `player_event` uses —
 /// without it, a player typing the sentence in chat would rewrite the roster.
 fn roster_from_list(text: &str) -> Option<Vec<String>> {
-    let body = text.rsplit_once("]: ")?.1;
+    let body = text.split_once("]: ")?.1;
     if !body.starts_with("There are ") {
         return None;
     }
@@ -814,9 +830,10 @@ async fn deadline(at: Option<Instant>) {
 
 /// Terminate the process and everything it spawned.
 ///
-/// On Windows the launcher is `cmd /c run.bat`, so killing the child only kills
-/// `cmd` — the JVM underneath survives, holds the world files, and blocks the
-/// next start. `taskkill /T` walks the tree.
+/// The JVM is launched directly, but it can spawn children of its own (and an
+/// installer run is a JVM too); killing only the parent would leave anything
+/// underneath holding the world files and blocking the next start.
+/// `taskkill /T` walks the tree.
 async fn force_kill(child: &mut Child) {
     #[cfg(target_os = "windows")]
     if let Some(pid) = child.id() {
@@ -881,6 +898,13 @@ mod tests {
 
         // A player typing the same words in chat must not move the count.
         assert_eq!(player_event(&line("<Alex> Steve joined the game")), None);
+        // ...including one that smuggles in a `]: ` of its own.
+        assert_eq!(player_event(&line("<Alex> x]: Notch joined the game")), None);
+        // Forge's longer prefix names the logger too.
+        assert_eq!(
+            player_event("[12:04:31] [Server thread/INFO] [minecraft/MinecraftServer]: Steve left the game"),
+            Some(("Steve".into(), false))
+        );
         assert_eq!(player_event(&line("Starting minecraft server")), None);
         assert_eq!(player_event(""), None);
     }
@@ -1215,6 +1239,10 @@ powershell -File \"%~dp0run_color.ps1\"
         // Said in chat, by someone trying it on.
         assert_eq!(
             roster_from_list("[12:00:00] [Server thread/INFO]: <eve> There are 9 of a max of 20 players online: eve"),
+            None
+        );
+        assert_eq!(
+            roster_from_list("[12:00:00] [Server thread/INFO]: <eve> x]: There are 1 of a max of 20 players online: eve"),
             None
         );
         assert_eq!(roster_from_list("[12:00:00] [Server thread/INFO]: bob joined the game"), None);

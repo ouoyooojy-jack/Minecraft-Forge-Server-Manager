@@ -12,16 +12,17 @@
   is decoration.
 -->
 <script lang="ts">
-  const DESTS = ["Home", "Download", "Remote", "Setting"];
+  const DESTS = ["首頁", "下載", "遠端", "設定"];
 
   let {
-    selected = $bindable(0),
+    selected,
     onnavigate,
   }: {
     selected: number;
     /** Fires on every rail click, including one that picks the destination
-     *  already showing — that click is how you leave a sub-page. */
-    onnavigate?: (index: number) => void;
+     *  already showing — that click is how you leave a sub-page. The shell
+     *  decides whether to go: a page with unsaved edits asks first. */
+    onnavigate: (index: number) => void;
   } = $props();
 </script>
 
@@ -30,7 +31,7 @@
     <button
       class="item"
       class:active={selected === index}
-      onclick={() => ((selected = index), onnavigate?.(index))}
+      onclick={() => onnavigate(index)}
       aria-current={selected === index ? "page" : undefined}
     >
       {label}

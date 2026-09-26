@@ -21,10 +21,12 @@ mod testutil;
 mod types;
 
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use agent::{Agent, AgentSettings};
@@ -49,7 +51,19 @@ pub struct AppState {
     supervisor: Arc<Supervisor>,
     /// Crashes in a row per server, for the auto-restart give-up rule. Cleared
     /// the moment a server reaches `Online`.
-    restart_counts: std::sync::Mutex<std::collections::HashMap<ServerId, u32>>,
+    restart_counts: Mutex<std::collections::HashMap<ServerId, u32>>,
+    /// Servers waiting out `RESTART_DELAY` after a crash. Taking one out of
+    /// the set — a start or stop by hand, a delete, the cancel button — is how
+    /// the restart is called off.
+    pending_restarts: Mutex<HashSet<ServerId>>,
+    /// Servers whose world is being zipped after a stop. Starting one now
+    /// would have Minecraft writing into the files the zip is reading.
+    backing_up: Mutex<HashSet<ServerId>>,
+    /// Servers the scheduled restart is cycling right now.
+    scheduled: Mutex<HashSet<ServerId>>,
+    /// Set once "quit" is chosen. Nothing may start after that, or the exit
+    /// would wait on a server it is about to orphan.
+    quitting: AtomicBool,
     downloader: Downloader,
     forge: Forge,
     /// Locates a JRE, and unpacks one when the machine has none.
@@ -60,7 +74,7 @@ pub struct AppState {
     remotes: Remotes,
     /// This machine's own listener, when the user has switched it on. `None`
     /// means nothing is bound and nothing is answering.
-    running_agent: std::sync::Mutex<Option<Agent>>,
+    running_agent: Mutex<Option<Agent>>,
     /// Where `agent.json` and `remotes.json` live.
     data_dir: PathBuf,
     /// Where installer jars and JREs land. Shared across servers, so the same
@@ -90,7 +104,11 @@ fn emit(app: &AppHandle, event: CoreEvent) {
                     .expect("restart mutex poisoned")
                     .remove(id);
             }
-            ServerState::Crashed { .. } => maybe_restart(app, id.clone()),
+            ServerState::Crashed { .. } => {
+                maybe_restart(app, id.clone());
+                after_stop(app, id.clone(), false);
+            }
+            ServerState::Stopped => after_stop(app, id.clone(), true),
             _ => {}
         }
     }
@@ -119,12 +137,12 @@ const RESTART_LIMIT: u32 = 3;
 fn maybe_restart(app: &AppHandle, id: ServerId) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let prepared = {
+        let tries = {
             let state = app.state::<AppState>();
             let Ok(config) = state.registry.load_config(&id) else {
                 return;
             };
-            if !config.restart_on_crash {
+            if !config.restart_on_crash || state.quitting.load(Ordering::SeqCst) {
                 return;
             }
 
@@ -167,18 +185,11 @@ fn maybe_restart(app: &AppHandle, id: ServerId) {
                 );
                 return;
             }
-
-            let Ok(config) = resolve_java(&state, &config, config.mc_version.as_deref()) else {
-                return;
-            };
-            (
-                Arc::clone(&state.supervisor),
-                state.registry.dir_of(&id),
-                config,
-                tries,
-            )
+            held(&state.pending_restarts).insert(id.clone());
+            tries
         };
-        let (supervisor, dir, config, tries) = prepared;
+        // The page shows a cancel button while one is pending.
+        emit(&app, CoreEvent::ServersChanged);
 
         announce(
             &app,
@@ -187,7 +198,13 @@ fn maybe_restart(app: &AppHandle, id: ServerId) {
         );
         tokio::time::sleep(RESTART_DELAY).await;
 
-        if let Err(error) = supervisor.start(&id, &dir, &config).await {
+        // Called off in the meantime, or already taken care of by hand.
+        if !held(&app.state::<AppState>().pending_restarts).remove(&id) {
+            return;
+        }
+        emit(&app, CoreEvent::ServersChanged);
+        if let Err(error) = launch(&app, &id).await {
+            announce(&app, &id, format!("自動重啟失敗：{}", in_words(&error)));
             emit(
                 &app,
                 CoreEvent::Error {
@@ -197,6 +214,114 @@ fn maybe_restart(app: &AppHandle, id: ServerId) {
             );
         }
     });
+}
+
+/// The start every path shares: the button, the restart after a crash, and
+/// the scheduled one. One order of checks, so none of them can skip one.
+async fn launch(app: &AppHandle, id: &ServerId) -> CoreResult<()> {
+    let state = app.state::<AppState>();
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err(CoreError::Precondition {
+            message: "程式正在關閉。".into(),
+        });
+    }
+    if held(&state.backing_up).contains(id) {
+        return Err(CoreError::Precondition {
+            message: "正在備份世界，備份完成後再啟動。".into(),
+        });
+    }
+    if !state.registry.eula_accepted(id) {
+        return Err(CoreError::Precondition {
+            message: "請先同意 Minecraft EULA。".into(),
+        });
+    }
+    let config = state.registry.load_config(id)?;
+    port_is_free(&state, id)?;
+    let config = resolve_java(&state, &config, config.mc_version.as_deref())?;
+    state
+        .supervisor
+        .start(id, &state.registry.dir_of(id), &config)
+        .await?;
+    open_tunnel_if_wanted(app, id.clone());
+    Ok(())
+}
+
+/// What follows a server going down, whichever way it went.
+///
+/// Runs synchronously up to the point of deciding, so that anything checking
+/// `backing_up` straight after the stop event already sees the backup.
+fn after_stop(app: &AppHandle, id: ServerId, clean: bool) {
+    let state = app.state::<AppState>();
+
+    // The public address follows the servers: with none left to point at,
+    // the agent goes down too. Not while one is about to come back.
+    if state.playit.auto()
+        && state.supervisor.active().is_empty()
+        && held(&state.pending_restarts).is_empty()
+        && held(&state.scheduled).is_empty()
+    {
+        state.playit.stop();
+    }
+
+    // Only after a clean stop: after a crash the world may be mid-write, and
+    // a copy of that is the thing a backup is supposed to protect against.
+    if !clean {
+        return;
+    }
+    let Ok(config) = state.registry.load_config(&id) else {
+        return;
+    };
+    if !config.backup_on_stop {
+        return;
+    }
+    let Ok(world) = world_dir(&state, &id) else {
+        return;
+    };
+    if !world.is_dir() {
+        return;
+    }
+    let store = backup_store(&state, &id);
+    held(&state.backing_up).insert(id.clone());
+    announce(app, &id, "正在備份世界…".into());
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            backup::create(&world, &store, KEEP_STOP_BACKUPS, backup::STOP_PREFIX)
+        })
+        .await;
+        held(&app.state::<AppState>().backing_up).remove(&id);
+        announce(
+            &app,
+            &id,
+            match result {
+                Ok(Ok(name)) => format!("已備份世界：{name}"),
+                Ok(Err(e)) => format!("備份失敗：{}", in_words(&e)),
+                Err(e) => format!("備份失敗：{e}"),
+            },
+        );
+        emit(&app, CoreEvent::ServersChanged);
+    });
+}
+
+/// How many of the copies taken on stop to keep. Fewer than the hand-made
+/// ones: they arrive every time the server stops, so they turn over fast.
+const KEEP_STOP_BACKUPS: usize = 5;
+
+/// A set of servers, locked.
+fn held(set: &Mutex<HashSet<ServerId>>) -> MutexGuard<'_, HashSet<ServerId>> {
+    set.lock().expect("server set mutex poisoned")
+}
+
+/// An error as a sentence for the console, where the UI's own wording for
+/// each kind of error is not available.
+fn in_words(error: &CoreError) -> String {
+    match error {
+        CoreError::JavaMissing { major } => {
+            format!("找不到 Java {major}。到伺服器頁按「啟動」，會提示下載。")
+        }
+        other => other.to_string(),
+    }
 }
 
 /// Put a line in the server's own console, so the decision is visible where
@@ -249,6 +374,7 @@ fn list_servers(state: State<'_, AppState>) -> CoreResult<Vec<ServerSummary>> {
             server.uptime_secs = Some(uptime);
             server.players = Some(players);
         }
+        server.restart_pending = held(&state.pending_restarts).contains(&server.id);
     }
     Ok(servers)
 }
@@ -271,11 +397,54 @@ async fn create_server_from_installer(
     name: String,
     installer: PathBuf,
 ) -> CoreResult<ServerId> {
+    install_new_server(&app, &state, &name, &installer).await
+}
+
+/// The same, from a Forge version rather than a jar: fetch the installer if it
+/// is not on disk yet, then install. One step for the person creating a
+/// server, who should not have to visit the downloads page first.
+#[tauri::command]
+async fn create_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    version: String,
+) -> CoreResult<ServerId> {
+    require_name(&name)?;
+    let installer = state
+        .downloads_dir
+        .join(forge::installer_filename(&version)?);
+    if !installer.is_file() {
+        state
+            .downloader
+            .fetch(
+                DownloadKind::ForgeInstaller {
+                    version: version.clone(),
+                },
+                forge::installer_url(&version)?,
+                installer.clone(),
+            )
+            .await?;
+    }
+    install_new_server(&app, &state, &name, &installer).await
+}
+
+fn require_name(name: &str) -> CoreResult<()> {
     if name.trim().is_empty() {
         return Err(CoreError::Precondition {
-            message: "Server name cannot be empty".into(),
+            message: "伺服器名稱不能是空的。".into(),
         });
     }
+    Ok(())
+}
+
+async fn install_new_server(
+    app: &AppHandle,
+    state: &AppState,
+    name: &str,
+    installer: &Path,
+) -> CoreResult<ServerId> {
+    require_name(name)?;
     // The UI picks from a list this app produced, but the argument still
     // crosses a trust boundary — only jars in the downloads folder may run.
     if installer.parent() != Some(state.downloads_dir.as_path()) || !installer.is_file() {
@@ -287,21 +456,21 @@ async fn create_server_from_installer(
     // Before the folder exists: the installer is itself a jar that needs the
     // right Java, and failing after `create` would leave an empty server behind
     // for the user to clean up.
-    let mc_version = installer_mc_version(&installer);
-    resolve_java(&state, &ServerConfig::default(), mc_version.as_deref())?;
+    let mc_version = installer_mc_version(installer);
+    resolve_java(state, &ServerConfig::default(), mc_version.as_deref())?;
 
-    let id = state.registry.create(&name)?;
-    emit(&app, CoreEvent::ServersChanged);
+    let id = state.registry.create(name)?;
+    emit(app, CoreEvent::ServersChanged);
 
     let config = state.registry.load_config(&id)?;
-    let config = resolve_java(&state, &config, mc_version.as_deref())?;
+    let config = resolve_java(state, &config, mc_version.as_deref())?;
     let dir = state.registry.dir_of(&id);
     // A failure leaves the server in place rather than deleting it: the console
     // output is the only clue to what went wrong, and silently removing what
     // the user just made is worse than an entry they can delete themselves.
     state
         .supervisor
-        .install(&id, &dir, &installer, &config)
+        .install(&id, &dir, installer, &config)
         .await?;
 
     state.registry.set_eula(&id, true)?;
@@ -318,7 +487,7 @@ async fn create_server_from_installer(
     }
     state.registry.save_config(&id, &config)?;
 
-    emit(&app, CoreEvent::ServersChanged);
+    emit(app, CoreEvent::ServersChanged);
     Ok(id)
 }
 
@@ -350,9 +519,32 @@ fn delete_server(app: AppHandle, state: State<'_, AppState>, id: ServerId) -> Co
             message: "請先停止伺服器再刪除。".into(),
         });
     }
+    if held(&state.backing_up).contains(&id) {
+        return Err(CoreError::Precondition {
+            message: "正在備份世界，備份完成後再刪除。".into(),
+        });
+    }
+    held(&state.pending_restarts).remove(&id);
+    let tunnel = state
+        .registry
+        .load_config(&id)
+        .ok()
+        .and_then(|c| c.tunnel_id);
     state.registry.delete(&id)?;
     state.supervisor.forget(&id);
     emit(&app, CoreEvent::ServersChanged);
+
+    // Its public address goes with it — the confirm dialog says so. Best
+    // effort: the server is already gone, and a tunnel left behind is one
+    // the user can still remove on playit's site.
+    if let Some(tunnel) = tunnel {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = app.state::<AppState>().playit.delete_tunnel(&tunnel).await {
+                playit_log(&app)(format!("刪除公開位址失敗：{e}"));
+            }
+        });
+    }
     Ok(())
 }
 
@@ -368,9 +560,32 @@ fn save_server_config(
     id: ServerId,
     config: ServerConfig,
 ) -> CoreResult<()> {
+    require_name(&config.name)?;
+    let before = state.registry.load_config(&id)?;
+    // Not the page's to change: where an imported server lives, and which
+    // tunnel carries this one. A page that loaded before the tunnel was made
+    // would otherwise save it away.
+    let config = ServerConfig {
+        external_path: before.external_path.clone(),
+        tunnel_id: before.tunnel_id.clone(),
+        ..config
+    };
     state.registry.save_config(&id, &config)?;
     // The display name may have changed; the card grid must refetch.
     emit(&app, CoreEvent::ServersChanged);
+
+    // Keep the name on playit's dashboard in step, for whoever reads it there.
+    if let (true, Some(tunnel)) = (config.name != before.name, config.tunnel_id) {
+        let app = app.clone();
+        let name = config.name;
+        tauri::async_runtime::spawn(async move {
+            let _ = app
+                .state::<AppState>()
+                .playit
+                .rename_tunnel(&tunnel, &name)
+                .await;
+        });
+    }
     Ok(())
 }
 
@@ -684,8 +899,10 @@ async fn start_agent(
     settings: &AgentSettings,
 ) -> CoreResult<Agent> {
     let handle = app.clone();
+    let supervisor = Arc::clone(&state.supervisor);
     Agent::start(
         Arc::clone(&state.registry),
+        Arc::new(move |id| supervisor.is_active(id)),
         settings.clone(),
         Arc::new(move |line| emit(&handle, CoreEvent::AgentActivity { line })),
     )
@@ -711,9 +928,15 @@ fn resolve_java(
     config: &ServerConfig,
     mc_version: Option<&str>,
 ) -> CoreResult<ServerConfig> {
-    if config.java_path.is_some() {
+    if config.java_path.as_deref().is_some_and(Path::is_file) {
         return Ok(config.clone());
     }
+    // A stored path that no longer exists — a JRE folder deleted by hand — is
+    // treated as none, rather than failing the spawn with "file not found".
+    let config = &ServerConfig {
+        java_path: None,
+        ..config.clone()
+    };
     let Some(version) = mc_version else {
         return Ok(config.clone());
     };
@@ -800,19 +1023,30 @@ async fn playit_finish_claim(state: State<'_, AppState>, code: String) -> CoreRe
         .await
 }
 
+/// Stop waiting on a claim the user walked away from.
+#[tauri::command]
+fn playit_cancel_claim(state: State<'_, AppState>) {
+    state.playit.cancel_claim();
+}
+
 /// Start the tunnel agent. Its log goes to the same activity feed as the remote
 /// listener's, which is where someone looks when a tunnel is not working.
 #[tauri::command]
 fn playit_start(app: AppHandle, state: State<'_, AppState>) -> CoreResult<()> {
+    state.playit.start(playit_log(&app))
+}
+
+/// Where the agent's own output, and anything said about it, goes.
+fn playit_log(app: &AppHandle) -> impl Fn(String) + Send + Sync + 'static {
     let handle = app.clone();
-    state.playit.start(move |line| {
+    move |line| {
         emit(
             &handle,
             CoreEvent::AgentActivity {
                 line: format!("playit: {line}"),
             },
         );
-    })
+    }
 }
 
 #[tauri::command]
@@ -820,25 +1054,58 @@ fn playit_stop(state: State<'_, AppState>) {
     state.playit.stop();
 }
 
-/// Create a tunnel for one server, named after it.
+/// Give one server a public address, or re-point the one it has.
 ///
-/// The name is how a tunnel is matched back to a server later, so it comes from
-/// the registry rather than from the UI — a caller that could choose the name
-/// could also point a tunnel at a server it does not name.
+/// The name and port come from the registry rather than from the UI — a
+/// caller that could choose them could point a tunnel at a server it does
+/// not name.
 #[tauri::command]
-async fn playit_create_tunnel(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
-    let (name, port) = {
-        let config = state.registry.load_config(&id)?;
-        // server.properties does not exist until the first run, and the
-        // default is the one Minecraft will write into it.
-        (config.name, server_port(&state, &id).unwrap_or(DEFAULT_MC_PORT))
-    };
-    state.playit.create_tunnel(&name, port).await
+async fn playit_create_tunnel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: ServerId,
+) -> CoreResult<()> {
+    let config = state.registry.load_config(&id)?;
+    // server.properties does not exist until the first run, and the default
+    // is the one Minecraft will write into it.
+    let port = server_port(&state, &id).unwrap_or(DEFAULT_MC_PORT);
+    let tunnel = state
+        .playit
+        .ensure(config.tunnel_id.as_deref(), &config.name, port, playit_log(&app))
+        .await?;
+    remember_tunnel(&app, &id, tunnel)
+}
+
+/// Store which tunnel a server's address lives on, if that is news.
+fn remember_tunnel(app: &AppHandle, id: &ServerId, tunnel: String) -> CoreResult<()> {
+    let state = app.state::<AppState>();
+    let mut config = state.registry.load_config(id)?;
+    if config.tunnel_id.as_deref() != Some(tunnel.as_str()) {
+        config.tunnel_id = Some(tunnel);
+        state.registry.save_config(id, &config)?;
+        emit(app, CoreEvent::ServersChanged);
+    }
+    Ok(())
 }
 
 #[tauri::command]
-async fn playit_delete_tunnel(state: State<'_, AppState>, id: String) -> CoreResult<()> {
-    state.playit.delete_tunnel(&id).await
+async fn playit_delete_tunnel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CoreResult<()> {
+    state.playit.delete_tunnel(&id).await?;
+    // Whichever server pointed at it no longer has one.
+    for server in state.registry.list().unwrap_or_default() {
+        if let Ok(mut config) = state.registry.load_config(&server.id) {
+            if config.tunnel_id.as_deref() == Some(id.as_str()) {
+                config.tunnel_id = None;
+                let _ = state.registry.save_config(&server.id, &config);
+            }
+        }
+    }
+    emit(&app, CoreEvent::ServersChanged);
+    Ok(())
 }
 
 /// Switch "public address follows the server" on or off.
@@ -861,53 +1128,40 @@ fn playit_unlink(state: State<'_, AppState>) -> CoreResult<()> {
 
 #[tauri::command]
 async fn start_server(app: AppHandle, state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
-    let config = state.registry.load_config(&id)?;
-    let dir = state.registry.dir_of(&id);
-    if !state.registry.eula_accepted(&id) {
-        return Err(CoreError::Precondition {
-            message: "請先同意 Minecraft EULA。".into(),
-        });
+    // Starting by hand supersedes a restart that was still counting down.
+    if held(&state.pending_restarts).remove(&id) {
+        emit(&app, CoreEvent::ServersChanged);
     }
-    port_is_free(&state, &id)?;
-    let config = resolve_java(&state, &config, config.mc_version.as_deref())?;
-    open_tunnel_if_wanted(&app, &state, &id, &config.name).await;
-    state.supervisor.start(&id, &dir, &config).await
+    launch(&app, &id).await
 }
 
 /// Bring this server's public address up alongside it, if the user asked for
 /// that in settings.
 ///
-/// Deliberately infallible from the caller's point of view: playit being
-/// unreachable is not a reason to refuse to start a server that the people on
-/// the same network can still join. The failure goes to the activity feed,
-/// which is where a missing public address is investigated.
-async fn open_tunnel_if_wanted(
-    app: &AppHandle,
-    state: &State<'_, AppState>,
-    id: &ServerId,
-    name: &str,
-) {
-    if !state.playit.auto() || !state.playit.linked() {
-        return;
-    }
-    let port = server_port(state, id).unwrap_or(DEFAULT_MC_PORT);
-    let handle = app.clone();
-    let log = move |line: String| {
-        emit(
-            &handle,
-            CoreEvent::AgentActivity {
-                line: format!("playit: {line}"),
-            },
-        );
-    };
-    if let Err(e) = state.playit.ensure(name, port, log).await {
-        emit(
-            app,
-            CoreEvent::AgentActivity {
-                line: format!("playit: 公開位址沒開起來：{e}"),
-            },
-        );
-    }
+/// In the background and infallible from the caller's point of view: playit
+/// being slow or unreachable is not a reason to hold up, or refuse, a server
+/// that the people on the same network can still join. The failure goes to
+/// the activity feed, which is where a missing public address is looked into.
+fn open_tunnel_if_wanted(app: &AppHandle, id: ServerId) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if !state.playit.auto() || !state.playit.linked() {
+            return;
+        }
+        let Ok(config) = state.registry.load_config(&id) else {
+            return;
+        };
+        let port = server_port(&state, &id).unwrap_or(DEFAULT_MC_PORT);
+        let result = state
+            .playit
+            .ensure(config.tunnel_id.as_deref(), &config.name, port, playit_log(&app))
+            .await
+            .and_then(|tunnel| remember_tunnel(&app, &id, tunnel));
+        if let Err(e) = result {
+            playit_log(&app)(format!("公開位址沒開起來：{e}"));
+        }
+    });
 }
 
 /// What Minecraft listens on when `server.properties` does not say otherwise.
@@ -918,7 +1172,7 @@ const DEFAULT_MC_PORT: u16 = 25565;
 /// `None` means the file has no usable value — it does not exist yet, or the
 /// line is empty or zero. Callers decide whether that is a refusal or the
 /// default; a tunnel wants the default, a collision check wants to stay quiet.
-fn server_port(state: &State<'_, AppState>, id: &ServerId) -> Option<u16> {
+fn server_port(state: &AppState, id: &ServerId) -> Option<u16> {
     state
         .registry
         .read_raw_properties(id)
@@ -938,7 +1192,7 @@ fn server_port(state: &State<'_, AppState>, id: &ServerId) -> Option<u16> {
 /// A server with no `server-port` line yet gets the benefit of the doubt: the
 /// file is written on first run, and refusing to start it would be worse than
 /// letting Minecraft report the collision itself.
-fn port_is_free(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<()> {
+fn port_is_free(state: &AppState, id: &ServerId) -> CoreResult<()> {
     let Some(port) = server_port(state, id) else {
         return Ok(());
     };
@@ -960,12 +1214,12 @@ fn port_is_free(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<()> {
 ///
 /// A world runs to hundreds of megabytes and this button is one click, so an
 /// unbounded store fills a disk without ever saying so. Copies taken
-/// automatically before a restore are outside this count.
+/// automatically are counted separately.
 const KEEP_BACKUPS: usize = 10;
 
 /// Where a server's world folder is. `level-name` names it; `world` is the
 /// default Minecraft writes, and the only name most servers ever have.
-fn world_dir(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<std::path::PathBuf> {
+fn world_dir(state: &AppState, id: &ServerId) -> CoreResult<std::path::PathBuf> {
     let level = state
         .registry
         .read_raw_properties(id)?
@@ -978,7 +1232,7 @@ fn world_dir(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<std::path
 
 /// Backups live under the app's own metadata for this server, never inside the
 /// server folder — see `backup.rs`.
-fn backup_store(state: &State<'_, AppState>, id: &ServerId) -> std::path::PathBuf {
+fn backup_store(state: &AppState, id: &ServerId) -> std::path::PathBuf {
     state.registry.meta_dir(id).join("backups")
 }
 
@@ -997,6 +1251,11 @@ async fn create_backup(state: State<'_, AppState>, id: ServerId) -> CoreResult<S
         if state.supervisor.is_active(&id) {
             return Err(CoreError::Precondition {
                 message: "伺服器執行中，現在備份會拷到寫到一半的世界。請先停止伺服器。".into(),
+            });
+        }
+        if held(&state.backing_up).contains(&id) {
+            return Err(CoreError::Precondition {
+                message: "正在自動備份，請稍候。".into(),
             });
         }
         (world_dir(&state, &id)?, backup_store(&state, &id))
@@ -1020,6 +1279,11 @@ async fn restore_backup(state: State<'_, AppState>, id: ServerId, name: String) 
         if state.supervisor.is_active(&id) {
             return Err(CoreError::Precondition {
                 message: "伺服器執行中，無法還原世界。請先停止伺服器。".into(),
+            });
+        }
+        if held(&state.backing_up).contains(&id) {
+            return Err(CoreError::Precondition {
+                message: "正在自動備份，請稍候。".into(),
             });
         }
         (world_dir(&state, &id)?, backup_store(&state, &id))
@@ -1126,7 +1390,7 @@ fn export_diagnostics(state: State<'_, AppState>, id: ServerId) -> CoreResult<St
             .into_bytes(),
     ));
 
-    if let Some(report) = newest_crash_report(&dir) {
+    if let Some(report) = newest_crash_report(&dir).and_then(|p| std::fs::read(p).ok()) {
         files.push(("crash-report.txt".into(), report));
     }
 
@@ -1134,13 +1398,40 @@ fn export_diagnostics(state: State<'_, AppState>, id: ServerId) -> CoreResult<St
         .downloads_dir
         .join(format!("診斷-{}-{}.zip", id.0, now_stamp()));
     backup::zip_blobs(&files, &out)?;
+    // Shown in Explorer, selected, ready to drag into a chat or an issue —
+    // a path in a toast is something nobody goes and finds.
+    reveal(&out)?;
     Ok(out.to_string_lossy().into_owned())
+}
+
+/// Open Explorer with one file selected.
+fn reveal(path: &Path) -> CoreResult<()> {
+    use std::os::windows::process::CommandExt as _;
+    // Raw, because Explorer does not understand `"/select,C:\a b\c"` — the
+    // quoting std would apply to a path with a space in it. Windows paths
+    // cannot contain a double quote, so this cannot be broken out of.
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()?;
+    Ok(())
+}
+
+/// Open the newest crash report in whatever the machine reads text with.
+#[tauri::command]
+fn open_crash_report(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+    let report = newest_crash_report(&state.registry.dir_of(&id)).ok_or_else(|| {
+        CoreError::Precondition {
+            message: "這座伺服器沒有當機報告。".into(),
+        }
+    })?;
+    std::process::Command::new("explorer").arg(report).spawn()?;
+    Ok(())
 }
 
 /// The most recent crash report, whenever it was written. Unlike the
 /// diagnosis, this bundle is not about one run — an old report is still the
 /// most useful thing in the folder.
-fn newest_crash_report(dir: &std::path::Path) -> Option<Vec<u8>> {
+fn newest_crash_report(dir: &std::path::Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in std::fs::read_dir(dir.join("crash-reports")).ok()?.flatten() {
         let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
@@ -1150,7 +1441,7 @@ fn newest_crash_report(dir: &std::path::Path) -> Option<Vec<u8>> {
             best = Some((modified, entry.path()));
         }
     }
-    std::fs::read(best?.1).ok()
+    Some(best?.1)
 }
 
 fn now_stamp() -> u64 {
@@ -1278,8 +1569,79 @@ fn crash_report(state: State<'_, AppState>, id: ServerId) -> Option<crash::Crash
 /// Graceful shutdown. The world saves; a force-kill follows only if the server
 /// ignores `stop` past the grace period.
 #[tauri::command]
-fn stop_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+fn stop_server(app: AppHandle, state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+    // Stop on a crashed server means "leave it down".
+    if held(&state.pending_restarts).remove(&id) {
+        emit(&app, CoreEvent::ServersChanged);
+        if !state.supervisor.is_active(&id) {
+            return Ok(());
+        }
+    }
     state.supervisor.stop(&id)
+}
+
+/// End a server that is ignoring `stop`, without waiting out the grace
+/// period. Whatever the world had not saved is lost.
+#[tauri::command]
+fn kill_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+    state.supervisor.kill(&id)
+}
+
+/// Call off a restart that is still counting down.
+#[tauri::command]
+fn cancel_restart(app: AppHandle, state: State<'_, AppState>, id: ServerId) {
+    if held(&state.pending_restarts).remove(&id) {
+        announce(&app, &id, "已取消自動重啟。".into());
+        emit(&app, CoreEvent::ServersChanged);
+    }
+}
+
+/// The whitelist and the operators, as the server's own files have them.
+#[tauri::command]
+fn player_access(state: State<'_, AppState>, id: ServerId) -> CoreResult<types::PlayerAccess> {
+    state.registry.player_access(&id)
+}
+
+/// Add or remove one name from the whitelist or the operators.
+///
+/// Through the server's own console, so only while it is up. Minecraft is the
+/// one that looks the name up, writes the file, and applies it at once;
+/// writing the JSON by hand would need a UUID lookup and would be overwritten
+/// by the running server's copy anyway.
+#[tauri::command]
+fn set_player_access(
+    state: State<'_, AppState>,
+    id: ServerId,
+    list: types::AccessList,
+    name: String,
+    allowed: bool,
+) -> CoreResult<()> {
+    // The name becomes part of a console line: nothing but what Minecraft
+    // allows in a player name may reach it.
+    if name.is_empty()
+        || name.len() > 16
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(CoreError::Precondition {
+            message: "玩家名稱只能有英文字母、數字和底線，最多 16 個字。".into(),
+        });
+    }
+    let command = match (list, allowed) {
+        (types::AccessList::Whitelist, true) => format!("whitelist add {name}"),
+        (types::AccessList::Whitelist, false) => format!("whitelist remove {name}"),
+        (types::AccessList::Ops, true) => format!("op {name}"),
+        (types::AccessList::Ops, false) => format!("deop {name}"),
+    };
+    state.supervisor.send(&id, command)
+}
+
+/// Turn the whitelist on or off on a running server, where it applies at once.
+#[tauri::command]
+fn set_whitelist(state: State<'_, AppState>, id: ServerId, on: bool) -> CoreResult<()> {
+    state.supervisor.send(
+        &id,
+        if on { "whitelist on" } else { "whitelist off" }.to_owned(),
+    )
 }
 
 #[tauri::command]
@@ -1358,8 +1720,8 @@ fn list_downloads(state: State<'_, AppState>) -> CoreResult<Vec<types::Downloade
 fn delete_download(state: State<'_, AppState>, path: PathBuf) -> CoreResult<()> {
     // Only files inside the downloads directory, whatever the UI sends.
     if path.parent() != Some(state.downloads_dir.as_path()) {
-        return Err(CoreError::Config {
-            message: "refusing to delete a file outside the downloads folder".into(),
+        return Err(CoreError::Precondition {
+            message: "只能刪除下載資料夾裡的檔案。".into(),
         });
     }
     std::fs::remove_file(path)?;
@@ -1367,10 +1729,99 @@ fn delete_download(state: State<'_, AppState>, path: PathBuf) -> CoreResult<()> 
 }
 
 // ─────────────────────────────────────────────────────────────
+// Scheduled restarts
+// ─────────────────────────────────────────────────────────────
+
+/// How often uptimes are checked against their schedule.
+const SCHEDULE_TICK: Duration = Duration::from_secs(30);
+
+/// Warnings in chat before a scheduled restart, as seconds before it.
+const SCHEDULE_WARNINGS: [u64; 2] = [60, 10];
+
+/// Restart servers that have been up longer than their config asks for.
+///
+/// Modded servers leak: a week of uptime is a slow server, and a nightly
+/// restart is the usual cure. Measured by uptime rather than a clock time, so
+/// there is nothing to configure beyond "every N hours" and a server started
+/// late is not restarted five minutes in.
+fn spawn_scheduled_restarts(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut tick = tokio::time::interval(SCHEDULE_TICK);
+        loop {
+            tick.tick().await;
+            let state = app.state::<AppState>();
+            for id in state.supervisor.active() {
+                let Ok(config) = state.registry.load_config(&id) else {
+                    continue;
+                };
+                let due = u64::from(config.restart_every_hours) * 3600;
+                let Some((uptime, _)) = state.supervisor.stats(&id) else {
+                    continue;
+                };
+                if due == 0
+                    || uptime < due
+                    || !matches!(state.supervisor.state(&id), ServerState::Online)
+                    || !held(&state.scheduled).insert(id.clone())
+                {
+                    continue;
+                }
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    scheduled_restart(&app, &id).await;
+                    held(&app.state::<AppState>().scheduled).remove(&id);
+                });
+            }
+        }
+    });
+}
+
+async fn scheduled_restart(app: &AppHandle, id: &ServerId) {
+    let state = app.state::<AppState>();
+    // The run this was scheduled for. If the user restarts it by hand during
+    // the countdown, that is a fresh run with its own clock.
+    let run = state.supervisor.launched_at(id);
+
+    let mut left = SCHEDULE_WARNINGS[0];
+    for warn_at in SCHEDULE_WARNINGS {
+        tokio::time::sleep(Duration::from_secs(left - warn_at)).await;
+        left = warn_at;
+        let _ = state
+            .supervisor
+            .send(id, format!("say 伺服器將在 {warn_at} 秒後定時重啟。"));
+    }
+    tokio::time::sleep(Duration::from_secs(left)).await;
+
+    if state.supervisor.launched_at(id) != run
+        || !matches!(state.supervisor.state(id), ServerState::Online)
+    {
+        return;
+    }
+    announce(app, id, "定時重啟：正在關閉…".into());
+    if state.supervisor.stop(id).is_err() {
+        return;
+    }
+
+    // Down, then any backup-on-stop done, then up again.
+    let deadline = Instant::now() + SHUTDOWN_GRACE + Duration::from_secs(600);
+    while Instant::now() < deadline
+        && (state.supervisor.is_active(id) || held(&state.backing_up).contains(id))
+    {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // A stop that ended in a crash belongs to the crash path; one that never
+    // ended is not something to start a second copy on top of.
+    if !matches!(state.supervisor.state(id), ServerState::Stopped) {
+        return;
+    }
+    if let Err(error) = launch(app, id).await {
+        announce(app, id, format!("定時重啟失敗：{}", in_words(&error)));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// How long to wait for servers to shut down before giving up and exiting.
 ///
 /// Longer than the supervisor's own 90-second grace period, because that clock
@@ -1480,6 +1931,11 @@ fn stop_everything_then_exit(app: &AppHandle) {
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        {
+            let state = app.state::<AppState>();
+            state.quitting.store(true, Ordering::SeqCst);
+            held(&state.pending_restarts).clear();
+        }
         // Each lookup is scoped so that no state guard is held across an await.
         for id in app.state::<AppState>().supervisor.active() {
             let _ = app.state::<AppState>().supervisor.stop(&id);
@@ -1492,9 +1948,12 @@ fn stop_everything_then_exit(app: &AppHandle) {
         // to a server being shut down is worse than one that stops answering.
         app.state::<AppState>().playit.stop();
 
-        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
-        while std::time::Instant::now() < deadline {
-            if app.state::<AppState>().supervisor.active().is_empty() {
+        // A backup-on-stop that starts as the last server goes down is
+        // waited for too: exiting mid-zip would throw the copy away.
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while Instant::now() < deadline {
+            let state = app.state::<AppState>();
+            if state.supervisor.active().is_empty() && held(&state.backing_up).is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1503,6 +1962,7 @@ fn stop_everything_then_exit(app: &AppHandle) {
     });
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         // Must be registered first: it decides whether this process is the one
@@ -1541,8 +2001,12 @@ pub fn run() {
                 java: Java::new(data_dir.join("java"))?,
                 playit: Playit::new(playit::root(&data_dir))?,
                 remotes: Remotes::new(&data_dir)?,
-                running_agent: std::sync::Mutex::new(None),
-                restart_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+                running_agent: Mutex::new(None),
+                restart_counts: Mutex::new(std::collections::HashMap::new()),
+                pending_restarts: Mutex::new(HashSet::new()),
+                backing_up: Mutex::new(HashSet::new()),
+                scheduled: Mutex::new(HashSet::new()),
+                quitting: AtomicBool::new(false),
                 data_dir: data_dir.clone(),
                 downloads_dir,
             });
@@ -1571,6 +2035,7 @@ pub fn run() {
                 }
             });
 
+            spawn_scheduled_restarts(app.handle().clone());
             build_tray(app.handle())?;
 
             #[cfg(target_os = "windows")]
@@ -1592,6 +2057,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_servers,
+            create_server,
             create_server_from_installer,
             import_server,
             delete_server,
@@ -1621,6 +2087,12 @@ pub fn run() {
             open_server_folder,
             start_server,
             stop_server,
+            kill_server,
+            cancel_restart,
+            player_access,
+            set_player_access,
+            set_whitelist,
+            open_crash_report,
             crash_report,
             list_players,
             list_backups,
@@ -1640,6 +2112,7 @@ pub fn run() {
             playit_install,
             playit_claim_url,
             playit_finish_claim,
+            playit_cancel_claim,
             playit_start,
             playit_stop,
             playit_create_tunnel,

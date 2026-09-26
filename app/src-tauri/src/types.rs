@@ -135,6 +135,8 @@ pub struct ServerSummary {
     /// the roster on the server page can never disagree about it.
     pub players: Option<Vec<String>>,
     pub uptime_secs: Option<u64>,
+    /// Crashed, and an automatic restart is counting down.
+    pub restart_pending: bool,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -173,6 +175,21 @@ pub struct ServerConfig {
     /// gives up after a few attempts rather than looping all night.
     #[serde(default)]
     pub restart_on_crash: bool,
+    /// The playit tunnel that carries this server's public address.
+    ///
+    /// Stored by id rather than matched by name: a name changes on rename and
+    /// two servers can share one, and either would point a public address at
+    /// the wrong place — or at nothing.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
+    /// Zip the world every time the server stops cleanly. A stopped server is
+    /// the only moment a copy is guaranteed consistent.
+    #[serde(default)]
+    pub backup_on_stop: bool,
+    /// Restart after this many hours of uptime, with a warning in chat first.
+    /// `0` is off. Together with `backup_on_stop` this is a scheduled backup.
+    #[serde(default)]
+    pub restart_every_hours: u32,
 }
 
 impl Default for ServerConfig {
@@ -186,6 +203,9 @@ impl Default for ServerConfig {
             forge_version: None,
             external_path: None,
             restart_on_crash: false,
+            tunnel_id: None,
+            backup_on_stop: false,
+            restart_every_hours: 0,
         }
     }
 }
@@ -385,6 +405,29 @@ pub struct ModFile {
     /// same file with `.disabled` on the end. Deleting is not the only way to
     /// take a mod out of a load order you are bisecting.
     pub enabled: bool,
+    /// What the mod calls itself and which build it is, from the metadata
+    /// inside the jar. A file name like `jei-1.20.1-forge-15.2.0.27.jar` is
+    /// readable; `a8f3c2.jar` from a modpack export is not.
+    pub display_name: Option<String>,
+    pub version: Option<String>,
+}
+
+/// Who may join and who runs the server, as `whitelist.json` and `ops.json`
+/// have it.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerAccess {
+    /// `white-list` in `server.properties`.
+    pub whitelist_on: bool,
+    pub whitelist: Vec<String>,
+    pub ops: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessList {
+    Whitelist,
+    Ops,
 }
 
 // ─────────────────────────────────────────────────────────────

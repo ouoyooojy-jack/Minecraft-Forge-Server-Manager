@@ -9,12 +9,13 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
-  import Guide from "./Guide.svelte";
   import Icon from "./Icon.svelte";
   import { THEMES, theme } from "./theme.svelte";
 
+  /** Opens the walkthrough, which the shell owns so there is only one. */
+  let { onguide }: { onguide: () => void } = $props();
+
   let menuOpen = $state(false);
-  let guide = $state(false);
 
   /**
    * Resolved per click, not once at module load. `getCurrentWindow()` needs the
@@ -81,7 +82,7 @@
       The walkthrough also opens itself on a first launch — this is how you get
       back to it afterwards.
     -->
-    <button class="ctl" onclick={() => (guide = true)} title="使用說明" aria-label="使用說明">
+    <button class="ctl" onclick={onguide} title="使用說明" aria-label="使用說明">
       <Icon name="help" size={15} />
     </button>
     <button
@@ -110,8 +111,6 @@
     </button>
   </div>
 </header>
-
-<Guide bind:open={guide} />
 
 <style>
   .titlebar {

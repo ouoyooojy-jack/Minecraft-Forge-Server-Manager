@@ -27,6 +27,10 @@
 //! devices or agents". The remote-access listener in `agent.rs` must therefore
 //! never be given a way to reach these functions on someone else's machine.
 //!
+//! "One" also means not minting a second one. A claim always creates a new
+//! agent on the account, so when playit's own installer has already linked
+//! this machine, its key is used instead of asking to link again.
+//!
 //! ## Why the claim flow is reimplemented here
 //!
 //! The agent has `claim generate`/`url`/`exchange` subcommands, but they print
@@ -40,14 +44,23 @@ use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::{CoreError, CoreResult, HTTP_TIMEOUT_SEC};
 
 const API_BASE: &str = "https://api.playit.gg";
+
+/// Every call to playit's API is a small JSON exchange. One that has not come
+/// back in this long is not coming back, and the caller must not hang on it.
+const API_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a `sc query` answer is reused. The status poll runs every few
+/// seconds, and spawning a process each time to ask the same question is waste.
+const SERVICE_CHECK_TTL: Duration = Duration::from_secs(30);
 
 /// Pinned rather than "latest": a release whose command-line interface changed
 /// would break this integration silently, and the user finds out when their
@@ -73,7 +86,8 @@ fn agent_url() -> String {
 pub struct PlayitStatus {
     /// The agent binary is on disk.
     pub installed: bool,
-    /// A secret key is stored, so this machine is attached to a playit account.
+    /// A secret key is available — this app's own, or the one an official
+    /// playit install left — so this machine is attached to a playit account.
     pub linked: bool,
     /// The agent process is up. Tunnels only carry traffic while it is.
     pub running: bool,
@@ -95,13 +109,16 @@ pub struct PlayitStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayitTunnel {
+    /// What a server's config stores to find its tunnel again.
     pub id: String,
     /// The tunnel's name on playit's side. This app names tunnels after the
-    /// server they point at, which is how a tunnel is matched back to one —
-    /// the local-port field in their payload is an untyped name/value bag, and
-    /// depending on its spelling would be depending on an implementation
-    /// detail.
+    /// server they were made for, but only for the person reading the list —
+    /// matching is by id, since names change and can repeat.
     pub name: String,
+    /// The port on this machine it forwards to, read from the same
+    /// `agent_config.fields` entry the agent itself uses. `None` if playit
+    /// stops sending it, in which case nothing is compared against it.
+    pub local_port: Option<u16>,
     /// What a player types. Already includes a port when there is one to type.
     pub address: String,
     /// `null` while playit is still assigning; the UI shows it as pending.
@@ -123,7 +140,18 @@ pub struct Playit {
     auto_path: PathBuf,
     /// The agent, while it is up. Killed on drop of the app, and on request.
     child: Mutex<Option<Child>>,
+    /// Where an official playit install keeps its key: the 1.0 service's
+    /// machine-wide config first, then 0.17's per-user one. Read, never
+    /// written — that file belongs to playit.
+    machine_secrets: Vec<PathBuf>,
     client: reqwest::Client,
+    /// Held across a whole `ensure`. Two servers starting together would
+    /// otherwise both see "no tunnel yet" and both create one.
+    ensure_lock: tokio::sync::Mutex<()>,
+    /// Bumped to abandon a claim that is waiting on the browser.
+    claim_generation: AtomicU64,
+    /// Last `sc query` answer and when it was taken.
+    service_seen: Mutex<Option<(Instant, bool)>>,
 }
 
 impl Playit {
@@ -132,6 +160,7 @@ impl Playit {
         std::fs::create_dir_all(&root)?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(HTTP_TIMEOUT_SEC))
+            .timeout(API_TIMEOUT)
             .user_agent(concat!("McServerManager/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| CoreError::Network {
@@ -142,7 +171,15 @@ impl Playit {
             secret_path: root.join("secret.txt"),
             auto_path: root.join("auto"),
             child: Mutex::new(None),
+            machine_secrets: ["ProgramData", "LOCALAPPDATA"]
+                .into_iter()
+                .filter_map(std::env::var_os)
+                .map(|dir| PathBuf::from(dir).join("playit_gg").join("playit.toml"))
+                .collect(),
             client,
+            ensure_lock: tokio::sync::Mutex::new(()),
+            claim_generation: AtomicU64::new(0),
+            service_seen: Mutex::new(None),
         })
     }
 
@@ -158,11 +195,49 @@ impl Playit {
         self.exe.is_file()
     }
 
-    /// The stored secret, if this machine has been linked.
+    /// The key to run with: this app's own if it linked one, otherwise the one
+    /// an official playit install on this machine already holds.
     fn secret(&self) -> Option<String> {
+        self.own_secret().or_else(|| self.machine_secret())
+    }
+
+    fn own_secret(&self) -> Option<String> {
         let text = std::fs::read_to_string(&self.secret_path).ok()?;
         let trimmed = text.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+
+    fn machine_secret(&self) -> Option<String> {
+        self.machine_secrets
+            .iter()
+            .find_map(|path| secret_from_toml(&std::fs::read_to_string(path).ok()?))
+    }
+
+    /// playit's own Windows service is up and running the machine's agent.
+    /// It is already carrying the tunnels then, and a second process on the
+    /// same key would only fight it for the connection.
+    fn service_carries_it(&self) -> bool {
+        if self.own_secret().is_some() || self.machine_secret().is_none() {
+            return false;
+        }
+        let mut seen = self.service_seen.lock().expect("playit mutex poisoned");
+        if let Some((at, answer)) = *seen {
+            if at.elapsed() < SERVICE_CHECK_TTL {
+                return answer;
+            }
+        }
+        let mut command = Command::new("sc");
+        command
+            .args(["query", "playitd"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        no_window(&mut command);
+        let answer = command
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("RUNNING"));
+        *seen = Some((Instant::now(), answer));
+        answer
     }
 
     pub fn linked(&self) -> bool {
@@ -196,7 +271,10 @@ impl Playit {
                     false
                 }
             },
-            None => false,
+            None => {
+                drop(guard);
+                self.service_carries_it()
+            }
         }
     }
 
@@ -223,9 +301,16 @@ impl Playit {
     /// purpose: the user is signing in, possibly registering, in a browser —
     /// a minute is normal and a short timeout would fail the common case.
     pub async fn finish_claim(&self, code: &str, timeout: Duration) -> CoreResult<()> {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
+        let generation = self.claim_generation.load(Ordering::SeqCst);
+        let cancelled = || self.claim_generation.load(Ordering::SeqCst) != generation;
 
         loop {
+            if cancelled() {
+                return Err(CoreError::Precondition {
+                    message: "已取消連結 playit.gg。".into(),
+                });
+            }
             let setup: String = self
                 .post_str(
                     "/claim/setup",
@@ -249,7 +334,7 @@ impl Playit {
                 _ => {}
             }
 
-            if std::time::Instant::now() > deadline {
+            if Instant::now() > deadline {
                 return Err(CoreError::Precondition {
                     message: "等太久了。請重新按一次連結 playit.gg。".into(),
                 });
@@ -278,10 +363,17 @@ impl Playit {
                     std::fs::write(&self.secret_path, key)?;
                     return Ok(());
                 }
-                Err(e) if std::time::Instant::now() > deadline => return Err(e),
+                Err(e) if Instant::now() > deadline || cancelled() => return Err(e),
                 Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
             }
         }
+    }
+
+    /// Abandon a `finish_claim` that is still waiting. The code it was
+    /// polling is simply never used again; there is nothing to undo on
+    /// playit's side until the user approves it.
+    pub fn cancel_claim(&self) {
+        self.claim_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Forget the secret and stop the agent.
@@ -289,7 +381,8 @@ impl Playit {
     /// Only removes this machine's copy of the key. The agent stays on the
     /// user's playit account until they remove it there, which is theirs to do
     /// — deleting someone's account resource from a third-party app is not this
-    /// app's call to make.
+    /// app's call to make. A key borrowed from an official playit install is
+    /// left alone for the same reason, so the machine stays linked through it.
     pub fn unlink(&self) -> CoreResult<()> {
         self.stop();
         if self.secret_path.exists() {
@@ -333,16 +426,12 @@ impl Playit {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        no_window(&mut command);
 
         let mut child = command.spawn().map_err(|e| CoreError::Process {
             message: format!("啟動 playit 失敗：{e}"),
         })?;
+        die_with_us(&child);
 
         // Both streams, one reader each: the agent reports tunnel status on
         // stdout and failures on stderr, and a pipe nobody drains fills up and
@@ -400,10 +489,7 @@ impl Playit {
             return status;
         };
 
-        match self
-            .post_value("/v1/agents/rundata", &serde_json::json!({}), Some(&secret))
-            .await
-        {
+        match self.rundata(&secret).await {
             Ok(data) => {
                 status.tunnels = data
                     .get("tunnels")
@@ -425,23 +511,15 @@ impl Playit {
     /// a bare hostname. A generic tunnel gives `hostname:45231`, and a port
     /// number is the thing that gets mistyped.
     ///
-    /// Returns immediately; playit allocates asynchronously, so the address
-    /// shows up in a later `status()` call.
-    pub async fn create_tunnel(&self, name: &str, local_port: u16) -> CoreResult<()> {
-        let secret = self.secret().ok_or_else(|| CoreError::Precondition {
-            message: "還沒連結 playit.gg 帳號。".into(),
-        })?;
-
-        let agent_id = self
-            .post_value("/v1/agents/rundata", &serde_json::json!({}), Some(&secret))
-            .await?
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| CoreError::Network {
-                message: "playit 沒有回傳 agent_id。".into(),
-            })?;
-
+    /// Returns the new tunnel's id immediately; playit allocates the address
+    /// asynchronously, so that shows up in a later `status()` call.
+    async fn create_tunnel(
+        &self,
+        secret: &str,
+        agent_id: &str,
+        name: &str,
+        local_port: u16,
+    ) -> CoreResult<String> {
         let body = serde_json::json!({
             "name": name,
             "tunnel_type": "minecraft-java",
@@ -460,52 +538,112 @@ impl Playit {
             "firewall_id": null,
             "proxy_protocol": null,
         });
-        self.post_value("/tunnels/create", &body, Some(&secret))
-            .await?;
-        Ok(())
+        self.post_value("/tunnels/create", &body, Some(secret))
+            .await?
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| CoreError::Network {
+                message: "playit 沒有回傳新隧道的 id。".into(),
+            })
     }
 
-    /// Make sure `name` has a public address, bringing up whatever is missing.
+    /// Make sure a server has a public address, bringing up whatever is
+    /// missing, and return the id of the tunnel that carries it.
     ///
     /// Idempotent, and the whole point of it: called on every server start, so
     /// it has to be safe to call when the agent is already up and the tunnel
-    /// already exists. A second tunnel with the same name would be a second
-    /// address for one server, which is worse than none.
+    /// already exists. A second tunnel for one server would be a second
+    /// address for it, which is worse than none.
+    ///
+    /// `known` is the id the server's config stored last time. A tunnel that
+    /// still exists is kept and re-pointed at `local_port` if the server's port
+    /// moved — same address, so nobody's saved server list goes stale. Without
+    /// a stored id (a server from before ids were kept), a tunnel carrying the
+    /// server's name is adopted once, and from then on the id is what matches.
     ///
     /// The address is not waited for. playit allocates it after the request
-    /// returns, and a server start is not the place to block on someone else's
-    /// queue — it appears in a later `status()`.
+    /// returns; it appears in a later `status()`.
     pub async fn ensure(
         &self,
+        known: Option<&str>,
         name: &str,
         local_port: u16,
         on_line: impl Fn(String) + Send + Sync + 'static,
-    ) -> CoreResult<()> {
-        if !self.linked() {
-            return Err(CoreError::Precondition {
-                message: "還沒連結 playit.gg 帳號。".into(),
-            });
-        }
+    ) -> CoreResult<String> {
+        let _one_at_a_time = self.ensure_lock.lock().await;
+        let secret = self.require_secret()?;
         if !self.running() {
             self.start(on_line)?;
         }
 
-        let status = self.status().await;
-        if let Some(reason) = status.offline {
-            return Err(CoreError::Network { message: reason });
+        let data = self.rundata(&secret).await?;
+        let agent_id = data
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Network {
+                message: "playit 沒有回傳 agent_id。".into(),
+            })?;
+        let tunnels: Vec<PlayitTunnel> = data
+            .get("tunnels")
+            .and_then(|t| t.as_array())
+            .map(|list| list.iter().filter_map(tunnel_from_json).collect())
+            .unwrap_or_default();
+
+        let found = match known {
+            Some(id) => tunnels.iter().find(|t| t.id == id),
+            None => tunnels.iter().find(|t| t.name == name),
+        };
+        if let Some(tunnel) = found {
+            if tunnel.local_port.is_some_and(|p| p != local_port) {
+                self.post_value(
+                    "/tunnels/update",
+                    &serde_json::json!({
+                        "tunnel_id": tunnel.id,
+                        "local_ip": IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        "local_port": local_port,
+                        "agent_id": agent_id,
+                        "enabled": true,
+                    }),
+                    Some(&secret),
+                )
+                .await?;
+            }
+            return Ok(tunnel.id.clone());
         }
-        let known = status.tunnels.iter().any(|t| t.name == name)
-            || status.pending.iter().any(|p| p == name);
-        if known {
-            return Ok(());
+
+        // Created, but the address is still being allocated.
+        let pending_ids = strings_at(&data, "pending", "id");
+        let pending_names = strings_at(&data, "pending", "name");
+        let pending = match known {
+            Some(id) => pending_ids.iter().find(|p| *p == id),
+            None => pending_names
+                .iter()
+                .position(|p| p == name)
+                .and_then(|i| pending_ids.get(i)),
+        };
+        if let Some(id) = pending {
+            return Ok(id.clone());
         }
-        self.create_tunnel(name, local_port).await
+
+        self.create_tunnel(&secret, agent_id, name, local_port).await
+    }
+
+    /// Keep the name on playit's dashboard in step with the server's.
+    /// Cosmetic, so a failure is the caller's to ignore.
+    pub async fn rename_tunnel(&self, id: &str, name: &str) -> CoreResult<()> {
+        let secret = self.require_secret()?;
+        self.post_value(
+            "/tunnels/rename",
+            &serde_json::json!({ "tunnel_id": id, "name": name }),
+            Some(&secret),
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn delete_tunnel(&self, id: &str) -> CoreResult<()> {
-        let secret = self.secret().ok_or_else(|| CoreError::Precondition {
-            message: "還沒連結 playit.gg 帳號。".into(),
-        })?;
+        let secret = self.require_secret()?;
         self.post_value(
             "/tunnels/delete",
             &serde_json::json!({ "tunnel_id": id }),
@@ -513,6 +651,17 @@ impl Playit {
         )
         .await?;
         Ok(())
+    }
+
+    fn require_secret(&self) -> CoreResult<String> {
+        self.secret().ok_or_else(|| CoreError::Precondition {
+            message: "還沒連結 playit.gg 帳號。".into(),
+        })
+    }
+
+    async fn rundata(&self, secret: &str) -> CoreResult<serde_json::Value> {
+        self.post_value("/v1/agents/rundata", &serde_json::json!({}), Some(secret))
+            .await
     }
 
     // ─────────────────────────────────────────────────────────
@@ -581,10 +730,79 @@ impl Drop for Playit {
     /// The agent is a child process on Windows, which means it outlives its
     /// parent unless something kills it. Leaving one behind would keep the
     /// tunnel up after the app is gone — a server nobody is watching, still
-    /// reachable from the internet.
+    /// reachable from the internet. `die_with_us` covers the exits that never
+    /// get this far.
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
+}
+
+/// Tie the agent's life to this process's, however this process ends.
+///
+/// `Drop` never runs when the app is ended from Task Manager or crashes, and
+/// that used to leave an agent running per such exit, still serving the tunnel.
+/// A job with KILL_ON_JOB_CLOSE fixes it at the OS level: its one handle is
+/// never closed here, so Windows closes it when this process goes, and takes
+/// every agent in the job along. One job for the app's lifetime, not one per
+/// start. Best effort — if it fails, `Drop` and `stop` still work as before.
+#[cfg(target_os = "windows")]
+fn die_with_us(child: &Child) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    // Stored as an address because a raw HANDLE is neither Send nor Sync.
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&info).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set == 0 {
+            return 0;
+        }
+        job as usize
+    });
+    job != 0 && unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn die_with_us(_child: &Child) -> bool {
+    false
+}
+
+/// `secret_key = "..."` out of playit's own config. A line scan rather than a
+/// TOML parser: it is one flat key in a file that is theirs to extend.
+fn secret_from_toml(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "secret_key").then(|| value.trim().trim_matches('"').trim().to_owned())
+        })
+        .filter(|key| !key.is_empty())
 }
 
 fn tunnel_from_json(value: &serde_json::Value) -> Option<PlayitTunnel> {
@@ -596,6 +814,17 @@ fn tunnel_from_json(value: &serde_json::Value) -> Option<PlayitTunnel> {
             .unwrap_or_default()
             .to_owned(),
         address: value.get("display_address")?.as_str()?.to_owned(),
+        local_port: value
+            .pointer("/agent_config/fields")
+            .and_then(|f| f.as_array())
+            .and_then(|fields| {
+                fields.iter().find_map(|f| {
+                    if f.get("name")?.as_str()? != "local_port" {
+                        return None;
+                    }
+                    f.get("value")?.as_str()?.parse().ok()
+                })
+            }),
         disabled_reason: value
             .get("disabled_reason")
             .and_then(|v| v.as_str())
@@ -627,10 +856,55 @@ pub fn root(data_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// Blind to whatever playit install the machine running the tests has.
     fn playit() -> (tempfile::TempDir, Playit) {
         let tmp = tempfile::tempdir().unwrap();
-        let p = Playit::new(root(tmp.path())).unwrap();
+        let mut p = Playit::new(root(tmp.path())).unwrap();
+        p.machine_secrets.clear();
         (tmp, p)
+    }
+
+    #[test]
+    fn an_official_install_links_the_machine_but_a_key_of_our_own_wins() {
+        let (tmp, mut p) = playit();
+        let toml = tmp.path().join("playit.toml");
+        p.machine_secrets = vec![tmp.path().join("missing.toml"), toml.clone()];
+        assert!(!p.linked());
+
+        std::fs::write(&toml, "# theirs\nsecret_key = \"machine-key\"\n").unwrap();
+        assert_eq!(p.secret().as_deref(), Some("machine-key"));
+
+        // Relinking after their key stopped working has to take effect.
+        std::fs::write(&p.secret_path, "own-key").unwrap();
+        assert_eq!(p.secret().as_deref(), Some("own-key"));
+
+        // Unlinking forgets our key and falls back; theirs is never touched.
+        p.unlink().unwrap();
+        assert_eq!(p.secret().as_deref(), Some("machine-key"));
+        assert!(toml.exists());
+    }
+
+    #[test]
+    fn the_secret_is_read_out_of_their_config_and_nothing_else_is() {
+        assert_eq!(secret_from_toml("secret_key = \"abc\"").as_deref(), Some("abc"));
+        assert_eq!(secret_from_toml("  secret_key=\"abc\"  \r\n").as_deref(), Some("abc"));
+        assert_eq!(secret_from_toml("other_secret_key = \"no\""), None);
+        assert_eq!(secret_from_toml("secret_key = \"\""), None);
+        assert_eq!(secret_from_toml(""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_spawned_agent_joins_the_job_that_dies_with_the_app() {
+        let mut child = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let joined = die_with_us(&child);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(joined, "without the job, a killed app leaves the agent running");
     }
 
     #[test]
@@ -711,6 +985,10 @@ mod tests {
                     "id": "t1",
                     "name": "farmserver",
                     "display_address": "cheese.gl.joinmc.link",
+                    "agent_config": { "fields": [
+                        { "name": "local_ip", "value": "127.0.0.1" },
+                        { "name": "local_port", "value": "25566" }
+                    ] },
                     "disabled_reason": null
                 },
                 { "id": "t2", "name": "old", "display_address": "x.y:25566",
@@ -731,6 +1009,8 @@ mod tests {
             .collect();
         assert_eq!(tunnels.len(), 2);
         assert_eq!(tunnels[0].address, "cheese.gl.joinmc.link");
+        assert_eq!(tunnels[0].local_port, Some(25566));
+        assert_eq!(tunnels[1].local_port, None, "absent is unknown, not port 0");
         assert_eq!(tunnels[1].disabled_reason.as_deref(), Some("over quota"));
 
         assert_eq!(strings_at(&data, "pending", "name"), ["waiting"]);

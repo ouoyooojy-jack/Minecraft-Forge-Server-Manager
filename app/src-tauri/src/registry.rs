@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use crate::properties::{self, PropertyField};
 use crate::types::{
-    is_installed, CoreError, CoreResult, ModFile, RawProperties, ServerConfig, ServerFile,
-    ServerId, ServerState, ServerSummary,
+    is_installed, CoreError, CoreResult, ModFile, PlayerAccess, RawProperties, ServerConfig,
+    ServerFile, ServerId, ServerState, ServerSummary,
 };
 
 const MANAGER_FILE: &str = "manager.json";
@@ -95,6 +95,7 @@ impl Registry {
                 // the supervisor.
                 players: None,
                 uptime_secs: None,
+                restart_pending: false,
                 id,
             });
         }
@@ -346,15 +347,44 @@ impl Registry {
                 if !name.to_lowercase().ends_with(".jar") {
                     return None;
                 }
+                let (display_name, version) = mod_metadata(&e.path());
                 Some(ModFile {
                     bytes: e.metadata().ok()?.len(),
                     name,
                     enabled,
+                    display_name,
+                    version,
                 })
             })
             .collect();
         out.sort_by_key(|m| m.name.to_lowercase());
         Ok(out)
+    }
+
+    /// The whitelist and the operators. Files that do not exist yet — a
+    /// server that has never run — read as empty lists.
+    pub fn player_access(&self, id: &ServerId) -> CoreResult<PlayerAccess> {
+        let dir = self.dir_of(id);
+        let names = |file: &str| -> Vec<String> {
+            let Ok(text) = fs::read_to_string(dir.join(file)) else {
+                return Vec::new();
+            };
+            let mut out: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(&text)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|entry| entry.get("name")?.as_str().map(str::to_owned))
+                .collect();
+            out.sort_by_key(|n| n.to_lowercase());
+            out
+        };
+        Ok(PlayerAccess {
+            whitelist_on: self
+                .read_raw_properties(id)?
+                .get("white-list")
+                .is_some_and(|v| v.trim() == "true"),
+            whitelist: names("whitelist.json"),
+            ops: names("ops.json"),
+        })
     }
 
     /// Turn a mod off or on by renaming it.
@@ -537,6 +567,100 @@ fn parse_xmx_mb(text: &str) -> Option<u32> {
         })
 }
 
+/// A mod's own name and version, from the metadata inside its jar.
+///
+/// Forge and NeoForge keep it in `META-INF/mods.toml` (or
+/// `neoforge.mods.toml`); 1.12 and older in `mcmod.info`. Either value may be
+/// missing, and a jar that is not a readable zip yields neither — the file
+/// name is always there to fall back on.
+fn mod_metadata(jar: &Path) -> (Option<String>, Option<String>) {
+    let Ok(file) = fs::File::open(jar) else {
+        return (None, None);
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(std::io::BufReader::new(file)) else {
+        return (None, None);
+    };
+    let mut read = |name: &str| -> Option<String> {
+        let mut entry = zip.by_name(name).ok()?;
+        // Metadata is a few KB. A huge entry by this name is not metadata,
+        // and reading it would stall the list for nothing.
+        if entry.size() > 256 * 1024 {
+            return None;
+        }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text).ok()?;
+        Some(text)
+    };
+
+    let (name, version) = if let Some(toml) =
+        read("META-INF/mods.toml").or_else(|| read("META-INF/neoforge.mods.toml"))
+    {
+        let (name, version) = first_mod_entry(&toml);
+        // The usual value: "whatever the build put in the manifest".
+        let version = match version.as_deref() {
+            Some("${file.jarVersion}") => read("META-INF/MANIFEST.MF")
+                .and_then(|m| manifest_value(&m, "Implementation-Version")),
+            _ => version,
+        };
+        (name, version)
+    } else if let Some(info) = read("mcmod.info") {
+        let json: serde_json::Value = serde_json::from_str(&info).unwrap_or_default();
+        let first = json
+            .as_array()
+            .or_else(|| json.get("modList")?.as_array())
+            .and_then(|mods| mods.first());
+        let field = |key: &str| Some(first?.get(key)?.as_str()?.to_owned());
+        (field("name"), field("version"))
+    } else {
+        (None, None)
+    };
+
+    // A placeholder the build never filled in is not a name or a version.
+    let real = |v: Option<String>| v.filter(|v| !v.trim().is_empty() && !v.contains("${"));
+    (real(name), real(version))
+}
+
+/// `displayName` and `version` from the first `[[mods]]` table.
+///
+/// ponytail: a line scan, not a TOML parser. Enough for the two quoted
+/// strings every mods.toml has near the top of the table; a multi-line
+/// description with a line starting `[` ends the scan early. Pull in a toml
+/// crate if that ever matters.
+fn first_mod_entry(toml: &str) -> (Option<String>, Option<String>) {
+    let (mut name, mut version) = (None, None);
+    let mut in_mods = false;
+    for line in toml.lines().map(str::trim) {
+        if line.starts_with('[') {
+            if in_mods {
+                break;
+            }
+            in_mods = line == "[[mods]]";
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=').filter(|_| in_mods) else {
+            continue;
+        };
+        let value = value.trim();
+        let quoted = ['"', '\'']
+            .into_iter()
+            .find_map(|q| value.strip_prefix(q)?.split_once(q).map(|(v, _)| v.to_owned()));
+        match key.trim() {
+            "displayName" => name = quoted,
+            "version" => version = quoted,
+            _ => {}
+        }
+    }
+    (name, version)
+}
+
+/// One `Key: value` line from a jar manifest.
+fn manifest_value(manifest: &str, key: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        (k.trim() == key).then(|| v.trim().to_owned())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +669,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path().join("servers")).unwrap();
         (dir, reg)
+    }
+
+    #[test]
+    fn a_mod_is_named_from_its_own_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jar = tmp.path().join("a8f3c2.jar");
+        crate::backup::zip_blobs(
+            &[
+                (
+                    "META-INF/mods.toml".into(),
+                    b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"jei\"\nversion=\"${file.jarVersion}\"\ndisplayName='Just Enough Items' # comment\n[[dependencies.jei]]\nversion=\"x\"\n".to_vec(),
+                ),
+                (
+                    "META-INF/MANIFEST.MF".into(),
+                    b"Manifest-Version: 1.0\r\nImplementation-Version: 15.2.0.27\r\n".to_vec(),
+                ),
+            ],
+            &jar,
+        )
+        .unwrap();
+        assert_eq!(
+            mod_metadata(&jar),
+            (Some("Just Enough Items".into()), Some("15.2.0.27".into()))
+        );
+
+        let old = tmp.path().join("old.jar");
+        crate::backup::zip_blobs(
+            &[(
+                "mcmod.info".into(),
+                br#"[{"modid":"x","name":"Old Mod","version":"${version}"}]"#.to_vec(),
+            )],
+            &old,
+        )
+        .unwrap();
+        assert_eq!(mod_metadata(&old), (Some("Old Mod".into()), None));
+
+        let junk = tmp.path().join("junk.jar");
+        fs::write(&junk, b"not a zip").unwrap();
+        assert_eq!(mod_metadata(&junk), (None, None));
+    }
+
+    #[test]
+    fn access_lists_read_names_and_tolerate_missing_files() {
+        let (_tmp, reg) = temp_registry();
+        let id = reg.create("S").unwrap();
+        assert!(reg.player_access(&id).unwrap().whitelist.is_empty());
+
+        let dir = reg.dir_of(&id);
+        fs::write(
+            dir.join("whitelist.json"),
+            r#"[{"uuid":"1","name":"zed"},{"uuid":"2","name":"Alex"}]"#,
+        )
+        .unwrap();
+        fs::write(dir.join("server.properties"), "white-list=true\n").unwrap();
+        let access = reg.player_access(&id).unwrap();
+        assert_eq!(access.whitelist, ["Alex", "zed"]);
+        assert!(access.whitelist_on);
+        assert!(access.ops.is_empty());
     }
 
     #[test]

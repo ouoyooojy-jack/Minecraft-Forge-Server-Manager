@@ -33,12 +33,20 @@ pub struct Backup {
     pub bytes: u64,
     /// Unix seconds. Formatted by the UI, which knows the user's locale.
     pub created_secs: u64,
-    /// Written automatically before a restore rather than asked for.
+    /// Written automatically — before a restore, or on a stop — rather than
+    /// asked for.
     pub automatic: bool,
 }
 
 /// Prefix marking a copy taken by `restore` rather than by the user.
 const AUTO_PREFIX: &str = "before-restore-";
+
+/// How many of those to keep. Each restore makes one, and someone trying
+/// backups one after another would otherwise pile up a world per click.
+const KEEP_BEFORE_RESTORE: usize = 3;
+
+/// Prefix for the copy taken every time a server stops, when that is on.
+pub const STOP_PREFIX: &str = "stop-";
 
 /// Everything saved for one server, newest first.
 pub fn list(store: &Path) -> CoreResult<Vec<Backup>> {
@@ -61,7 +69,7 @@ pub fn list(store: &Path) -> CoreResult<Vec<Backup>> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
             bytes: meta.len(),
-            automatic: name.starts_with(AUTO_PREFIX),
+            automatic: name.starts_with(AUTO_PREFIX) || name.starts_with(STOP_PREFIX),
             name,
         });
     }
@@ -72,10 +80,10 @@ pub fn list(store: &Path) -> CoreResult<Vec<Backup>> {
 
 /// Zip `world` into the store. Returns the file name it wrote.
 ///
-/// `keep` bounds the store afterwards: worlds are large, and a backup button
-/// with no ceiling fills a disk quietly. Automatic copies are never counted or
-/// pruned — the one taken just before a restore is the one most likely to be
-/// wanted, and least likely to be asked for by name.
+/// `keep` bounds how many backups with the same `prefix` stay afterwards:
+/// worlds are large, and a backup button with no ceiling fills a disk quietly.
+/// Counted per prefix, so copies taken automatically never push out the ones
+/// the user asked for by hand.
 pub fn create(world: &Path, store: &Path, keep: usize, prefix: &str) -> CoreResult<String> {
     if !world.is_dir() {
         return Err(CoreError::Precondition {
@@ -93,7 +101,7 @@ pub fn create(world: &Path, store: &Path, keep: usize, prefix: &str) -> CoreResu
     zip_dir(world, &partial)?;
     std::fs::rename(&partial, &path)?;
 
-    prune(store, keep)?;
+    prune(store, prefix, keep)?;
     Ok(name)
 }
 
@@ -110,7 +118,7 @@ pub fn restore(world: &Path, store: &Path, name: &str) -> CoreResult<()> {
     }
 
     if world.is_dir() {
-        create(world, store, usize::MAX, AUTO_PREFIX)?;
+        create(world, store, KEEP_BEFORE_RESTORE, AUTO_PREFIX)?;
     }
 
     // Unpack beside the world, then swap. Extracting over the top would leave
@@ -150,10 +158,13 @@ fn safe_entry(store: &Path, name: &str) -> CoreResult<PathBuf> {
     Ok(store.join(name))
 }
 
-/// Drop the oldest user-made backups past `keep`.
-fn prune(store: &Path, keep: usize) -> CoreResult<()> {
-    let mine: Vec<Backup> = list(store)?.into_iter().filter(|b| !b.automatic).collect();
-    for old in mine.into_iter().skip(keep) {
+/// Drop the oldest backups with this prefix past `keep`.
+fn prune(store: &Path, prefix: &str, keep: usize) -> CoreResult<()> {
+    let same: Vec<Backup> = list(store)?
+        .into_iter()
+        .filter(|b| b.name.starts_with(prefix))
+        .collect();
+    for old in same.into_iter().skip(keep) {
         let _ = std::fs::remove_file(store.join(old.name));
     }
     Ok(())
@@ -337,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_the_newest_and_never_touches_automatic_copies() {
+    fn pruning_keeps_the_newest_of_one_kind_and_leaves_the_others() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("backups");
         std::fs::create_dir_all(&store).unwrap();
@@ -361,7 +372,7 @@ mod tests {
                 .unwrap();
         }
 
-        prune(&store, 2).unwrap();
+        prune(&store, "world-", 2).unwrap();
         let left: Vec<String> = list(&store).unwrap().into_iter().map(|b| b.name).collect();
         assert_eq!(
             left,

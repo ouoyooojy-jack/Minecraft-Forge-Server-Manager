@@ -17,6 +17,7 @@
     listForgeVersions,
     onCoreEvent,
   } from "../lib/api";
+  import { transfers } from "../lib/downloads.svelte";
   import { formatBytes, formatSpeed } from "../lib/format";
   import {
     downloadPercent,
@@ -36,15 +37,13 @@
   let files = $state<DownloadedFile[]>([]);
   let error = $state<string | null>(null);
 
-  /** In-flight and just-finished transfers, keyed by id. */
-  let active = $state<Record<number, DownloadProgress>>({});
-
   const versions = $derived(groups.find((g) => g.mcMajor === major)?.versions ?? []);
-  const activeList = $derived(Object.values(active));
+  const activeList = $derived(Object.values(transfers));
 
-  /** Matching on the version string avoids restating the core's naming rule. */
+  /** The core's own file name for it; a substring match would call
+   *  `1.20.1-47.2.0` downloaded because `1.20.1-47.2.01` is. */
   const alreadyOnDisk = $derived(
-    !!version && files.some((f) => f.name.includes(version)),
+    !!version && files.some((f) => f.name === `forge-${version}-installer.jar`),
   );
   /**
    * Any transfer at all, not just this version.
@@ -128,18 +127,10 @@
     loadVersions();
     refreshFiles();
 
+    // The transfers themselves live in the shared store; this page only
+    // needs to know when one lands, to list the new jar.
     const unlisten = onCoreEvent((event) => {
-      if (event.type !== "download") return;
-      active[event.id] = event;
-
-      if (event.state.kind !== "running") {
-        // A finished transfer stays on screen briefly so the outcome is
-        // readable, then clears itself. Failures linger longer — the message
-        // is the whole point of showing them.
-        refreshFiles();
-        const linger = event.state.kind === "failed" ? 8000 : 2500;
-        setTimeout(() => delete active[event.id], linger);
-      }
+      if (event.type === "download" && event.state.kind !== "running") refreshFiles();
     });
     return () => void unlisten.then((fn) => fn());
   });
@@ -149,7 +140,7 @@
   <header>
     <div>
       <h1>下載</h1>
-      <p class="sub">Forge 官方 Maven 的所有發行版本。</p>
+      <p class="sub">Forge 官方的所有發行版本。建立伺服器時也會自動下載，這裡是先下載或清理用的。</p>
     </div>
     <button
       class="ghost"
@@ -170,7 +161,7 @@
       </div>
     {:else}
       <label class="field">
-        <span>Minecraft version</span>
+        <span>Minecraft 版本</span>
         <div class="select">
           <select
             value={major}
@@ -186,7 +177,7 @@
       </label>
 
       <label class="field">
-        <span>Forge version</span>
+        <span>Forge 版本</span>
         <div class="select wide">
           <select bind:value={version} disabled={loadingVersions || !versions.length}>
             {#each versions as v (v)}

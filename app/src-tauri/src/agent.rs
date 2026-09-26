@@ -37,7 +37,11 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::registry::Registry;
-use crate::types::{CoreError, CoreResult, ServerFile};
+use crate::types::{CoreError, CoreResult, ServerFile, ServerId};
+
+/// Whether a server is running right now. A closure rather than the
+/// supervisor itself, so this module stays testable without one.
+pub type IsRunning = Arc<dyn Fn(&ServerId) -> bool + Send + Sync>;
 
 /// Not 25565: that is Minecraft's, and a manager that squats on it would stop
 /// the very server it manages from starting.
@@ -246,6 +250,7 @@ impl Agent {
     /// rather than silently leaving the switch on with nothing behind it.
     pub async fn start(
         registry: Arc<Registry>,
+        running: IsRunning,
         settings: AgentSettings,
         on_event: Arc<dyn Fn(String) + Send + Sync>,
     ) -> CoreResult<Self> {
@@ -274,12 +279,13 @@ impl Agent {
                 }
 
                 let registry = Arc::clone(&registry);
+                let running = Arc::clone(&running);
                 let token = Arc::clone(&token);
                 let on_event = Arc::clone(&on_event);
                 tokio::spawn(async move {
                     let result = tokio::time::timeout(
                         tokio::time::Duration::from_secs(DEADLINE_SEC),
-                        serve(stream, &registry, &token),
+                        serve(stream, &registry, &running, &token),
                     )
                     .await;
                     match result {
@@ -309,7 +315,12 @@ impl Drop for Agent {
 ///
 /// Returns a line describing what happened, for the activity list — a listener
 /// the user cannot watch is one they have no reason to trust.
-async fn serve(stream: TcpStream, registry: &Registry, token: &str) -> CoreResult<String> {
+async fn serve(
+    stream: TcpStream,
+    registry: &Registry,
+    running: &IsRunning,
+    token: &str,
+) -> CoreResult<String> {
     let (read_half, mut write) = stream.into_split();
     // Capped before buffering: an endless line would otherwise be read into
     // memory until there is none left.
@@ -334,7 +345,7 @@ async fn serve(stream: TcpStream, registry: &Registry, token: &str) -> CoreResul
             // them tells an attacker which half to keep working on.
             Response::failed("配對碼不正確")
         }
-        Ok(message) => handle(registry, message.request),
+        Ok(message) => handle(registry, running, message.request),
     };
 
     let note = match (&response.ok, &response.error) {
@@ -351,7 +362,7 @@ async fn serve(stream: TcpStream, registry: &Registry, token: &str) -> CoreResul
     Ok(note)
 }
 
-fn handle(registry: &Registry, request: Request) -> Response {
+fn handle(registry: &Registry, running: &IsRunning, request: Request) -> Response {
     match request {
         Request::List => match registry.list() {
             Ok(servers) => Response {
@@ -385,6 +396,11 @@ fn handle(registry: &Registry, request: Request) -> Response {
             }
         }
 
+        // Same rule as the local editor: Minecraft rewrites these files when it
+        // shuts down, so an edit made while it runs would silently vanish.
+        Request::Write { server, .. } if running(&ServerId(server.clone())) => {
+            Response::failed("伺服器執行中，關閉時會覆寫這個檔案。請先停止伺服器再編輯。")
+        }
         Request::Write { server, file, text } => {
             match registry.write_file(&crate::types::ServerId(server), file, &text) {
                 Ok(()) => Response {
@@ -402,6 +418,29 @@ fn handle(registry: &Registry, request: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn never_running() -> IsRunning {
+        Arc::new(|_| false)
+    }
+
+    #[test]
+    fn a_running_server_refuses_remote_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Registry::new(tmp.path().join("servers")).unwrap();
+        let id = registry.create("Test").unwrap();
+        let running: IsRunning = Arc::new(|_| true);
+
+        let reply = handle(
+            &registry,
+            &running,
+            Request::Write {
+                server: id.0,
+                file: ServerFile::Properties,
+                text: "motd=x\n".into(),
+            },
+        );
+        assert!(!reply.ok);
+    }
 
     #[test]
     fn a_pairing_code_is_readable_and_not_reused() {
@@ -493,7 +532,7 @@ mod tests {
         let token = settings.token.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = serve(stream, &registry_for_task, &token).await;
+            let _ = serve(stream, &registry_for_task, &never_running(), &token).await;
         });
 
         let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -541,7 +580,7 @@ mod tests {
                 let registry = Arc::clone(&registry_for_task);
                 let token = token_for_task.clone();
                 tokio::spawn(async move {
-                    let _ = serve(stream, &registry, &token).await;
+                    let _ = serve(stream, &registry, &never_running(), &token).await;
                 });
             }
         });

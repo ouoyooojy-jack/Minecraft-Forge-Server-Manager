@@ -20,8 +20,17 @@
   import Modal from "../lib/Modal.svelte";
   import { formatBytes, formatMemory, formatUptime } from "../lib/format";
   import { isActive, primaryAction, STATE_LABEL } from "../lib/serverState";
+  import { unsaved } from "../lib/unsaved.svelte";
   import {
     addMods,
+    cancelRestart,
+    killServer,
+    openCrashReport,
+    playerAccess,
+    playitDeleteTunnel,
+    playitStart,
+    setPlayerAccess,
+    setWhitelist,
     deleteMod,
     deleteServer,
     consoleSince,
@@ -56,7 +65,9 @@
     type CrashInfo,
     type Fix,
     type LogLine,
+    type AccessList,
     type ModFile,
+    type PlayerAccess,
     type PlayitStatus,
     type PropertyField,
     type PropertyGroup,
@@ -70,7 +81,7 @@
 
   /** Left rail of the settings tab. The four groups come from the core's
    *  table; the last two are this app's own, not part of the file. */
-  type Section = "general" | PropertyGroup | "mods" | "backups" | "files";
+  type Section = "general" | PropertyGroup | "players" | "mods" | "backups" | "files";
 
   const SECTIONS: [Section, string][] = [
     ["general", "一般"],
@@ -78,6 +89,7 @@
     ["gameplay", "玩法"],
     ["world", "世界"],
     ["advanced", "進階"],
+    ["players", "玩家"],
     ["mods", "模組"],
     ["backups", "備份"],
     ["files", "原始檔"],
@@ -150,6 +162,18 @@
    *  config. Kept as a string so a half-typed number is not clamped mid-edit. */
   let memory = $state("");
 
+  /**
+   * The app's own per-server switches, as the form holds them.
+   *
+   * They save with 儲存 like every other row. They used to save on click, and
+   * that save reloaded the form — throwing away any server.properties edit
+   * sitting unsaved next to them, with nothing on screen to say so.
+   */
+  let restartOnCrash = $state(false);
+  let backupOnStop = $state(false);
+  /** Hours as typed; "0" is off. */
+  let restartHours = $state("0");
+
   /** Every server, to catch two of them claiming the same port. The check has
    *  to look outside this page, so the whole list is kept rather than one. */
   let all = $state<ServerSummary[]>([]);
@@ -168,11 +192,25 @@
   let edits = $state<Record<string, string>>({});
 
   const shown = $derived(fields.filter((f) => f.group === section));
-  const dirty = $derived(
-    Object.keys(edits).length > 0 ||
-      (name.trim() !== "" && name.trim() !== config?.name) ||
-      (memory !== "" && Number(memory) !== config?.memoryMb),
+
+  /** How many rows differ from disk — what the save bar counts. */
+  const pending = $derived(
+    Object.keys(edits).length +
+      [
+        name.trim() !== "" && name.trim() !== config?.name,
+        memory !== "" && Number(memory) !== config?.memoryMb,
+        config !== null && restartOnCrash !== config.restartOnCrash,
+        config !== null && backupOnStop !== config.backupOnStop,
+        restartHours !== "" && Number(restartHours) !== config?.restartEveryHours,
+      ].filter(Boolean).length,
   );
+  const dirty = $derived(pending > 0);
+
+  // The shell asks before navigating away from unsaved edits.
+  $effect(() => {
+    unsaved.dirty = dirty;
+    return () => (unsaved.dirty = false);
+  });
 
   /** Below 512 MB no Forge server starts at all; above 64 GB the number is a
    *  typo, and an -Xmx larger than the machine has makes the JVM refuse to
@@ -191,8 +229,11 @@
 
   /** Numeric fields are typed as free text, so an empty or non-numeric box has
    *  to block the save — `max-players=` would leave the server unstartable. */
+  const hoursBad = $derived(!(/^\d+$/.test(restartHours) && +restartHours <= 168));
+
   const invalid = $derived(
     memoryBad ||
+      hoursBad ||
       fields.some(
         (f) => f.kind === "int" && f.key in edits && !/^-?\d+$/.test(edits[f.key]),
       ),
@@ -201,15 +242,24 @@
   /**
    * The playit.gg tunnel for this server, for the 連線 section.
    *
-   * Matched by name because that is what the core names a tunnel it creates —
-   * the local port it points at is not in playit's payload under any
-   * documented key, and the name is the half this app owns.
+   * By the id the core stored when it made the tunnel. The name is only a
+   * fallback for a tunnel made before ids were stored — names drift when a
+   * server is renamed, ids do not.
    */
   let playit = $state<PlayitStatus | null>(null);
   let tunnelBusy = $state(false);
-  const tunnel = $derived(playit?.tunnels.find((t) => t.name === config?.name) ?? null);
+  let confirmingUntunnel = $state(false);
+  const tunnel = $derived(
+    playit?.tunnels.find((t) => config?.tunnelId && t.id === config.tunnelId) ??
+      playit?.tunnels.find((t) => t.name === config?.name) ??
+      null,
+  );
   /** Created, but playit has not allocated the hostname yet. */
   const tunnelPending = $derived(playit?.pending.includes(config?.name ?? "") ?? false);
+  /** The tunnel forwards somewhere this server no longer listens. */
+  const tunnelStale = $derived(
+    tunnel?.localPort != null && server?.port != null && tunnel.localPort !== server.port,
+  );
 
   /** Flips for a moment after a copy, so a silent clipboard write has a reply. */
   let copied = $state(false);
@@ -220,6 +270,33 @@
     navigator.clipboard.writeText(address);
     copied = true;
     setTimeout(() => (copied = false), 1600);
+  }
+
+  /**
+   * Everything a friend needs to join, as one paste: where, which version, and
+   * which mods to install. The mod list is the part people forget, and a
+   * modded server refuses a client that is missing one.
+   */
+  let invited = $state(false);
+
+  function copyInvitation() {
+    if (!tunnel?.address || !server) return;
+    const enabled = mods.filter((m) => m.enabled);
+    const forge = server.forgeVersion ? ` + Forge ${server.forgeVersion}` : "";
+    const text = [
+      `伺服器：${server.name}`,
+      `位址：${tunnel.address}`,
+      `版本：Minecraft ${server.mcVersion ?? "?"}${forge}`,
+      enabled.length
+        ? `模組（${enabled.length} 個，要裝一樣的）：\n` +
+          enabled
+            .map((m) => `- ${m.displayName ?? m.name}${m.version ? ` ${m.version}` : ""}`)
+            .join("\n")
+        : "沒有裝模組。",
+    ].join("\n");
+    navigator.clipboard.writeText(text);
+    invited = true;
+    setTimeout(() => (invited = false), 1600);
   }
 
   const refreshPlayit = () =>
@@ -278,11 +355,22 @@
     backupBusy = false;
   }
 
+  let deletingBackup = $state<string | null>(null);
+
   const removeBackup = (name: string) =>
     run(async () => {
+      deletingBackup = null;
       await deleteBackup(id, name);
       backups = await listBackups(id);
     });
+
+  /** Which kind of copy it is, from the prefix the core gave its name. */
+  const backupKind = (name: string) =>
+    name.startsWith("stop-")
+      ? "關閉時自動備份"
+      : name.startsWith("before-restore-")
+        ? "還原前自動備份"
+        : null;
 
   /**
    * Files hovering over the window, while the mods pane is the one showing.
@@ -319,7 +407,6 @@
   const exportBundle = () =>
     run(async () => {
       exported = await exportDiagnostics(id);
-      await openServerFolder(id);
     });
 
   const dateOf = (secs: number) =>
@@ -412,6 +499,41 @@
 
   let banning = $state<string | null>(null);
 
+  /** The whitelist and the operators. Read from the server's own files. */
+  let access = $state<PlayerAccess | null>(null);
+  let newWhitelist = $state("");
+  let newOp = $state("");
+  const NAME_RULE = /^[A-Za-z0-9_]{1,16}$/;
+
+  const loadAccess = () =>
+    run(async () => {
+      access = await playerAccess(id);
+    });
+
+  /**
+   * Through the server's console: Minecraft looks the name up and writes the
+   * file itself. It writes it a moment after the command, so the list is read
+   * again after that moment rather than straight away.
+   */
+  const changeAccess = (list: AccessList, who: string, allowed: boolean) =>
+    run(async () => {
+      await setPlayerAccess(id, list, who, allowed);
+      if (list === "whitelist") newWhitelist = "";
+      else newOp = "";
+      setTimeout(loadAccess, 1200);
+    });
+
+  function addName(list: AccessList) {
+    const who = (list === "whitelist" ? newWhitelist : newOp).trim();
+    if (NAME_RULE.test(who)) changeAccess(list, who, true);
+  }
+
+  const toggleWhitelist = () =>
+    run(async () => {
+      await setWhitelist(id, !access?.whitelistOn);
+      setTimeout(loadAccess, 1200);
+    });
+
   /** What the button under a diagnosis should say. */
   const FIX_LABEL: Record<Fix["kind"], string> = {
     memory: "調高記憶體",
@@ -437,8 +559,31 @@
     }
   }
 
-  /** Start, offering the download when the machine has no matching Java. */
+  /** Set while the second click that ends the process is being waited for. */
+  let confirmingKill = $state(false);
+
+  const kill = () =>
+    run(async () => {
+      confirmingKill = false;
+      await killServer(id);
+    });
+
+  /**
+   * Start, offering the download when the machine has no matching Java.
+   *
+   * Unsaved edits are saved first. Pressing 啟動 with a switch flipped and not
+   * saved means "start it like this"; starting with the old value and saying
+   * nothing is how a setting silently fails to take.
+   */
   async function start() {
+    if (dirty) {
+      if (invalid) {
+        tab = "settings";
+        error = "有還沒儲存的設定格式不對，先改好或按「還原」再啟動。";
+        return;
+      }
+      if (!(await saveSettings())) return;
+    }
     try {
       await startServer(id);
       error = null;
@@ -469,10 +614,32 @@
     if (section === "connection") void refreshPlayit();
   });
 
+  /** Make the tunnel, or point the existing one back at this server's port. */
   async function createTunnel() {
     tunnelBusy = true;
     await run(async () => {
       await playitCreateTunnel(id);
+      await refreshPlayit();
+    });
+    tunnelBusy = false;
+  }
+
+  async function startTunnel() {
+    tunnelBusy = true;
+    await run(async () => {
+      await playitStart();
+      await refreshPlayit();
+    });
+    tunnelBusy = false;
+  }
+
+  async function removeTunnel() {
+    if (!tunnel) return;
+    const which = tunnel.id;
+    confirmingUntunnel = false;
+    tunnelBusy = true;
+    await run(async () => {
+      await playitDeleteTunnel(which);
       await refreshPlayit();
     });
     tunnelBusy = false;
@@ -483,7 +650,10 @@
       all = await listServers();
       const found = all.find((s) => s.id === id);
       // The server was deleted from under us — nothing left to show.
-      if (!found) return back();
+      if (!found) {
+        unsaved.dirty = false;
+        return back();
+      }
       server = found;
       uptime = found.uptimeSecs;
     });
@@ -495,6 +665,9 @@
       edits = {};
       name = config.name;
       memory = String(config.memoryMb);
+      restartOnCrash = config.restartOnCrash;
+      backupOnStop = config.backupOnStop;
+      restartHours = String(config.restartEveryHours);
     });
 
   const loadMods = () =>
@@ -566,29 +739,41 @@
     }
   }
 
-  async function saveSettings() {
-    if (!config || saving || invalid) return;
+  /** Only server.properties edits are pending, and those wait for a stop. */
+  const onlyPropsWhileUp = $derived(isUp && pending === Object.keys(edits).length);
+
+  /** Resolves whether everything pending reached the disk. */
+  async function saveSettings(): Promise<boolean> {
+    if (!config || saving || invalid) return false;
     saving = true;
     try {
-      // Name and memory are both config, so one write covers them — and the
-      // core turns `memoryMb` back into the `-Xmx` line on disk.
-      const next = {
+      // Everything but server.properties is config, so one write covers it —
+      // and the core turns `memoryMb` back into the `-Xmx` line on disk.
+      const next: ServerConfig = {
         ...config,
         name: name.trim() || config.name,
         memoryMb: memory === "" ? config.memoryMb : Number(memory),
+        restartOnCrash,
+        backupOnStop,
+        restartEveryHours: Number(restartHours),
       };
-      if (next.name !== config.name || next.memoryMb !== config.memoryMb) {
+      if (JSON.stringify(next) !== JSON.stringify(config)) {
         await saveServerConfig(id, next);
       }
       // Refused by the core while the server is running, and rightly so — it
-      // would be overwritten on shutdown. The fields are disabled to match.
+      // would be overwritten on shutdown. Kept pending rather than dropped, so
+      // they can be saved once it stops.
+      const kept = isUp ? edits : {};
       if (!isUp && Object.keys(edits).length) await saveProperties(id, edits);
       await loadSettings();
+      edits = kept;
       error = null;
       saved = true;
       setTimeout(() => (saved = false), 1600);
+      return Object.keys(kept).length === 0;
     } catch (e) {
       error = errorMessage(e);
+      return false;
     } finally {
       saving = false;
     }
@@ -597,6 +782,7 @@
   const remove = () =>
     run(async () => {
       await deleteServer(id);
+      unsaved.dirty = false;
       back();
     });
 
@@ -615,6 +801,7 @@
     void refreshPlayit();
     loadBackups();
     loadPlayers();
+    loadAccess();
     loadCrash();
     loadSettings();
     loadMods();
@@ -645,6 +832,15 @@
         // The crash report only exists once the process is gone, so this is
         // the earliest moment there is anything to read.
         if (event.state.kind === "crashed") loadCrash();
+        if (event.state.kind !== "stopping") confirmingKill = false;
+        // Minecraft rewrites server.properties as it shuts down, and the
+        // whitelist command writes it too. Show what is on disk now — unless
+        // there are edits, which a reload would throw away.
+        if (event.state.kind === "stopped" || event.state.kind === "crashed") {
+          if (!dirty) loadSettings();
+          loadAccess();
+          loadBackups();
+        }
         // A start may have opened a public address on its way up. Re-read it
         // once the address has had a moment to be allocated, so the copy
         // button in the header appears without being gone looking for.
@@ -726,6 +922,17 @@
         <Icon name={action.icon} size={14} />
         {action.label}
       </Button>
+      {#if server?.state.kind === "stopping"}
+        <!-- A modded world can take minutes to save, and a hung one never
+             finishes. The world loses whatever it had not written yet. -->
+        <Button
+          danger
+          onclick={() => (confirmingKill ? kill() : (confirmingKill = true))}
+          title="不等存檔，直接結束程序。最後幾分鐘的進度可能會遺失。"
+        >
+          {confirmingKill ? "確定強制結束" : "強制結束"}
+        </Button>
+      {/if}
       <!-- Restarting a server that has not finished booting would send `stop`
            to something not yet listening for it. -->
       <Button disabled={!online || restarting} onclick={restart}>
@@ -746,34 +953,41 @@
 
   <div class="stats">
     <div class="stat">
-      <span class="k">Online players</span>
+      <span class="k">線上玩家</span>
       <span class="v tabular">{server?.players?.length ?? "—"}<small>/ {server?.maxPlayers ?? "—"}</small></span>
     </div>
     <div class="stat">
-      <span class="k">Server uptime</span>
+      <span class="k">已執行</span>
       <span class="v tabular">{uptime === null ? "—" : formatUptime(uptime)}</span>
     </div>
     <div class="stat">
-      <span class="k">Memory</span>
+      <span class="k">記憶體上限</span>
       <span class="v tabular">{server ? formatMemory(server.memoryMb) : "—"}</span>
     </div>
     <div class="stat">
-      <span class="k">Port</span>
+      <span class="k">連接埠</span>
       <span class="v tabular">{server?.port ?? "—"}</span>
     </div>
   </div>
 
   <div class="tabs" role="tablist">
     <button role="tab" aria-selected={tab === "console"} onclick={() => (tab = "console")}>
-      Console
+      主控台
     </button>
     <button role="tab" aria-selected={tab === "settings"} onclick={() => (tab = "settings")}>
-      Server setting
+      伺服器設定
     </button>
   </div>
 
   {#if error}
     <p class="error" role="alert">{error}</p>
+  {/if}
+
+  {#if server?.restartPending}
+    <div class="pending-restart">
+      <span>伺服器當機了，幾秒後會自動重新啟動。</span>
+      <Button onclick={() => run(() => cancelRestart(id))}>取消自動重啟</Button>
+    </div>
   {/if}
 
   {#if tab === "console"}
@@ -789,8 +1003,11 @@
               </Button>
             {/if}
             {#if crash.path}
-              <Button onclick={() => run(() => openServerFolder(id))}>開啟完整報告</Button>
+              <Button onclick={() => run(() => openCrashReport(id))}>開啟當機報告</Button>
             {/if}
+            <Button onclick={exportBundle} title="壓成一個 zip，要問人時丟這個檔就好">
+              匯出診斷檔
+            </Button>
           </div>
         </div>
       {/if}
@@ -798,7 +1015,7 @@
       {#if online}
         <div class="roster">
           <span class="roster-head">
-            Online players
+            線上玩家
             <span class="tabular">{players.length}</span>
           </span>
           {#if players.length === 0}
@@ -921,7 +1138,10 @@
             <ul class="mod-list">
               {#each mods as mod (mod.name)}
                 <li class:off={!mod.enabled}>
-                  <span class="mod-name" title={mod.name}>{mod.name}</span>
+                  <span class="mod-name" class:plain={mod.displayName} title={mod.name}>
+                    {mod.displayName ?? mod.name}
+                    {#if mod.version}<span class="mod-ver">{mod.version}</span>{/if}
+                  </span>
                   <span class="mod-size tabular">{formatBytes(mod.bytes)}</span>
                   <button
                     class="mod-toggle"
@@ -945,26 +1165,84 @@
             </ul>
           {/if}
 
-          <div class="danger">
+        {:else if section === "players"}
+          {#snippet accessList(list: AccessList, title: string, names: string[])}
+            <div class="pane-head sub">
+              <h3>{title}</h3>
+              <span class="count tabular">{names.length}</span>
+            </div>
+            {#if names.length > 0}
+              <ul class="mod-list">
+                {#each names as who (who)}
+                  <li>
+                    <span class="mod-name plain">{who}</span>
+                    <button
+                      class="mod-remove"
+                      disabled={!online}
+                      onclick={() => changeAccess(list, who, false)}
+                      aria-label="移除 {who}"
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <div class="add-name">
+              <input
+                placeholder="玩家名稱（Minecraft 帳號名）"
+                spellcheck="false"
+                disabled={!online}
+                value={list === "whitelist" ? newWhitelist : newOp}
+                oninput={(e) =>
+                  list === "whitelist"
+                    ? (newWhitelist = e.currentTarget.value)
+                    : (newOp = e.currentTarget.value)}
+                onkeydown={(e) => e.key === "Enter" && addName(list)}
+              />
+              <Button
+                disabled={!online ||
+                  !NAME_RULE.test((list === "whitelist" ? newWhitelist : newOp).trim())}
+                onclick={() => addName(list)}
+              >
+                加入
+              </Button>
+            </div>
+          {/snippet}
+
+          <div class="pane-head">
+            <h2>玩家</h2>
+          </div>
+          <p class="note">
+            {online
+              ? "名單透過伺服器自己的指令修改，會立刻生效。"
+              : "伺服器執行中才能修改名單：Minecraft 要自己查玩家帳號。下面是上次存下來的名單。"}
+          </p>
+
+          <div class="row">
             <span class="label">
-              <span class="name">刪除伺服器</span>
+              <span class="name">白名單</span>
+              <code>white-list</code>
               <small>
-                {server?.imported
-                  ? "只會從清單移除，資料夾與世界檔案留在原處。"
-                  : "移除這個伺服器與它的世界檔案，無法復原。"}
+                {access?.whitelistOn
+                  ? "開啟中：只有名單上的人進得來。"
+                  : "關閉中：任何知道位址的人都能進來。公開位址發出去之前建議打開。"}
               </small>
             </span>
-            {#if confirmingDelete}
-              <span class="confirm">
-                <Button onclick={() => (confirmingDelete = false)}>取消</Button>
-                <Button danger onclick={remove}>確定刪除</Button>
-              </span>
-            {:else}
-              <Button danger disabled={isUp} onclick={() => (confirmingDelete = true)}>
-                刪除
-              </Button>
-            {/if}
+            <span class="control">
+              <button
+                class="bool"
+                class:on={access?.whitelistOn}
+                disabled={!online}
+                onclick={toggleWhitelist}
+              >
+                {access?.whitelistOn ? "開" : "關"}
+              </button>
+            </span>
           </div>
+
+          {@render accessList("whitelist", "白名單", access?.whitelist ?? [])}
+          {@render accessList("ops", "管理員（OP）", access?.ops ?? [])}
         {:else if section === "backups"}
           <div class="pane-head">
             <h2>備份</h2>
@@ -982,7 +1260,7 @@
           {:else}
             <p class="note">
               把世界資料夾壓成 zip 存在這個 app 的資料夾裡，不會寫進伺服器目錄。
-              手動備份保留最近 10 份，還原前自動存的那份不算在內也不會被刪。
+              手動備份保留最近 10 份、關閉時自動備份 5 份、還原前自動存的 3 份，各算各的。
             </p>
           {/if}
 
@@ -998,7 +1276,7 @@
                   <li>
                   <span class="mod-name" title={item.name}>
                     {dateOf(item.createdSecs)}
-                    {#if item.automatic}<span class="auto">還原前自動存</span>{/if}
+                    {#if backupKind(item.name)}<span class="auto">{backupKind(item.name)}</span>{/if}
                   </span>
                   <span class="mod-size tabular">{formatBytes(item.bytes)}</span>
                   {#if restoring === item.name}
@@ -1015,14 +1293,21 @@
                       還原
                     </button>
                   {/if}
-                  <button
-                    class="mod-remove"
-                    onclick={() => removeBackup(item.name)}
-                    disabled={backupBusy}
-                    aria-label="刪除備份"
-                  >
-                    <Icon name="trash" size={15} />
-                  </button>
+                  {#if deletingBackup === item.name}
+                    <button onclick={() => (deletingBackup = null)}>取消</button>
+                    <button class="mod-toggle on" onclick={() => removeBackup(item.name)}>
+                      確定刪除
+                    </button>
+                  {:else}
+                    <button
+                      class="mod-remove"
+                      onclick={() => (deletingBackup = item.name)}
+                      disabled={backupBusy}
+                      aria-label="刪除備份"
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -1065,7 +1350,7 @@
               </span>
             </label>
 
-            <div class="row">
+            <div class="row" class:changed={config !== null && restartOnCrash !== config.restartOnCrash}>
               <span class="label">
                 <span class="name">當機後自動重啟</span>
                 <small>
@@ -1074,23 +1359,39 @@
                 </small>
               </span>
               <span class="control">
-                <button
-                  class="bool"
-                  class:on={config?.restartOnCrash}
-                  onclick={() =>
-                    config &&
-                    run(async () => {
-                      await saveServerConfig(id, {
-                        ...config!,
-                        restartOnCrash: !config!.restartOnCrash,
-                      });
-                      await loadSettings();
-                    })}
-                >
-                  {config?.restartOnCrash ? "開" : "關"}
+                <button class="bool" class:on={restartOnCrash} onclick={() => (restartOnCrash = !restartOnCrash)}>
+                  {restartOnCrash ? "開" : "關"}
                 </button>
               </span>
             </div>
+
+            <div class="row" class:changed={config !== null && backupOnStop !== config.backupOnStop}>
+              <span class="label">
+                <span class="name">關閉時自動備份世界</span>
+                <small>每次正常關閉後把世界壓成 zip，保留最近 5 份。世界大的話，關閉後要多等一下才能再啟動。</small>
+              </span>
+              <span class="control">
+                <button class="bool" class:on={backupOnStop} onclick={() => (backupOnStop = !backupOnStop)}>
+                  {backupOnStop ? "開" : "關"}
+                </button>
+              </span>
+            </div>
+
+            <label class="row" class:changed={Number(restartHours) !== config?.restartEveryHours}>
+              <span class="label">
+                <span class="name">定時重啟（小時）</span>
+                <small>
+                  {hoursBad
+                    ? "請填 0 到 168 之間的整數。"
+                    : +restartHours === 0
+                      ? "0 是關閉。模組伺服器開久了容易越跑越卡，可以設每幾小時自動重啟一次。"
+                      : `每連續執行 ${+restartHours} 小時重啟一次，重啟前 1 分鐘和 10 秒會在遊戲裡提醒。`}
+                </small>
+              </span>
+              <span class="control">
+                <input class="tabular" type="number" min="0" max="168" bind:value={restartHours} />
+              </span>
+            </label>
 
             <label
               class="row"
@@ -1111,6 +1412,28 @@
                 <input class="tabular" type="number" min="512" max="65536" bind:value={memory} />
               </span>
             </label>
+
+            <div class="danger">
+              <span class="label">
+                <span class="name">刪除伺服器</span>
+                <small>
+                  {server?.imported
+                    ? "只會從清單移除，資料夾與世界檔案留在原處；在這裡做的備份會一起刪除。"
+                    : "伺服器資料夾會整個刪除，包括世界、模組和備份，無法復原。"}
+                  {#if config?.tunnelId}它在 playit.gg 的公開位址也會一起刪除。{/if}
+                </small>
+              </span>
+              {#if confirmingDelete}
+                <span class="confirm">
+                  <Button onclick={() => (confirmingDelete = false)}>取消</Button>
+                  <Button danger onclick={remove}>確定刪除</Button>
+                </span>
+              {:else}
+                <Button danger disabled={isUp} onclick={() => (confirmingDelete = true)}>
+                  刪除
+                </Button>
+              {/if}
+            </div>
           {/if}
 
           {#if section === "connection"}
@@ -1119,33 +1442,91 @@
                 <span class="name">公開位址</span>
                 <code>playit.gg</code>
                 <small>
-                  {#if tunnel?.address}
-                    朋友在「多人遊戲 → 直接連線」貼這個位址就能進來，不用加通訊埠，也不用設定路由器。{#if !playit?.running}
-                      隧道現在沒在跑，要到「設定 → 公開連線」按啟動才連得進來。{/if}
+                  {#if !playit?.installed || !playit.linked}
+                    要先到左側「設定」頁的「公開連線」下載代理程式並連結 playit.gg 帳號，只要做一次。
+                  {:else if tunnel?.disabledReason}
+                    playit.gg 停用了這個位址：{tunnel.disabledReason}
+                  {:else if tunnelStale}
+                    這個位址還指向連接埠 {tunnel?.localPort}，伺服器現在用 {server?.port}，朋友會連不進來。按「修正」改過去。
+                  {:else if tunnel?.address}
+                    朋友在「多人遊戲 → 直接連線」貼這個位址就能進來，不用設定路由器。
                   {:else if tunnel || tunnelPending}
                     playit.gg 還在配置位址，幾秒後按重新整理。
-                  {:else if playit?.linked}
-                    建一條 playit.gg 隧道，讓不在同一個網路的人也連得進來。
                   {:else}
-                    要先到「設定 → 公開連線」下載代理程式並連結 playit.gg 帳號。
+                    建一個 playit.gg 位址，讓不在同一個網路的人也連得進來。{#if playit.auto}
+                      「伺服器啟動時自動開公開連線」開著，直接啟動伺服器也會自動建。{/if}
                   {/if}
                 </small>
               </span>
               <span class="control wide">
-                {#if tunnel?.address}
-                  <code class="addr">{tunnel.address}</code>
-                  <Button onclick={() => navigator.clipboard.writeText(tunnel!.address)}>
-                    複製
+                {#if !playit?.installed || !playit.linked}
+                  <!-- Nothing to press here; the setup lives in one place. -->
+                {:else if tunnelStale}
+                  <Button onclick={createTunnel} disabled={tunnelBusy}>
+                    {tunnelBusy ? "修正中…" : "修正"}
                   </Button>
+                {:else if tunnel?.address}
+                  <code class="addr">{tunnel.address}</code>
+                  <Button onclick={copyInvite}>{copied ? "已複製" : "複製"}</Button>
                 {:else if tunnel || tunnelPending}
                   <Button onclick={refreshPlayit}>重新整理</Button>
-                {:else if playit?.linked}
+                {:else}
                   <Button onclick={createTunnel} disabled={tunnelBusy}>
                     {tunnelBusy ? "建立中…" : "建立公開位址"}
                   </Button>
                 {/if}
               </span>
             </div>
+
+            {#if playit?.linked && tunnel}
+              <div class="row">
+                <span class="label">
+                  <span class="name">隧道</span>
+                  <small>
+                    {playit.running
+                      ? "執行中，位址現在連得進來。"
+                      : "沒在跑：位址還在，但要啟動隧道才連得進來。"}
+                  </small>
+                </span>
+                <span class="control">
+                  {#if !playit.running}
+                    <Button onclick={startTunnel} disabled={tunnelBusy}>啟動隧道</Button>
+                  {/if}
+                </span>
+              </div>
+
+              {#if tunnel.address}
+                <div class="row">
+                  <span class="label">
+                    <span class="name">邀請訊息</span>
+                    <small>位址、版本和要裝哪些模組，一次複製，貼給朋友就好。</small>
+                  </span>
+                  <span class="control">
+                    <Button onclick={copyInvitation}>
+                      <Icon name={invited ? "check" : "copy"} size={14} />
+                      {invited ? "已複製" : "複製邀請"}
+                    </Button>
+                  </span>
+                </div>
+              {/if}
+
+              <div class="row">
+                <span class="label">
+                  <span class="name">移除公開位址</span>
+                  <small>從你的 playit.gg 帳號刪掉這個位址。之後再建會拿到不同的位址，要重新發給朋友。</small>
+                </span>
+                <span class="control">
+                  {#if confirmingUntunnel}
+                    <span class="confirm">
+                      <Button onclick={() => (confirmingUntunnel = false)}>取消</Button>
+                      <Button danger onclick={removeTunnel} disabled={tunnelBusy}>確定移除</Button>
+                    </span>
+                  {:else}
+                    <Button danger onclick={() => (confirmingUntunnel = true)}>移除</Button>
+                  {/if}
+                </span>
+              </div>
+            {/if}
           {/if}
 
           {#each shown as field (field.key)}
@@ -1211,18 +1592,25 @@
             {/if}
           {/each}
 
-          <div class="save-row">
+        {/if}
+
+        <!-- Sticky, and in every section once something is pending: an edit
+             made in 連線 must not look saved from 模組. -->
+        {#if dirty || saved || !["players", "mods", "backups", "files"].includes(section)}
+          <div class="save-row" class:pending={dirty}>
             <span class="hint">
-              {#if saved}
+              {#if saved && !dirty}
                 已儲存。
-              {:else if isUp}
-                伺服器執行中，關閉時會覆寫 server.properties。請先停止再修改。
               {:else if invalid}
-                有欄位不是整數，先改好才能儲存。
+                有欄位格式不對，先改好才能儲存。
+              {:else if onlyPropsWhileUp}
+                {pending} 項 server.properties 的變更要等伺服器停止後才能儲存。
               {:else if dirty}
-                {Object.keys(edits).length} 項未儲存，重新啟動後生效。
+                {pending} 項未儲存。{isUp ? "儲存後重新啟動才會生效。" : "按儲存，或直接按啟動（會先幫你儲存）。"}
+              {:else if isUp}
+                伺服器執行中，server.properties 要停止後才能修改。
               {:else}
-                修改後重新啟動伺服器才會生效。
+                修改後按儲存，重新啟動伺服器才會生效。
               {/if}
             </span>
             <span class="save-buttons">
@@ -1230,7 +1618,7 @@
               <Button
                 variant="primary"
                 onclick={saveSettings}
-                disabled={saving || invalid || !dirty}
+                disabled={saving || invalid || !dirty || onlyPropsWhileUp}
               >
                 <Icon name="check" size={14} />
                 儲存
@@ -1956,6 +2344,19 @@
     font-size: var(--font-small);
   }
 
+  /* A mod's own name reads as words; only a bare file name is set in mono. */
+  .mod-name.plain {
+    font-family: var(--font-sans);
+    font-size: var(--font-body);
+  }
+
+  .mod-ver {
+    margin-left: 8px;
+    color: var(--faint);
+    font-family: var(--font-mono);
+    font-size: var(--font-tiny);
+  }
+
   .mod-size {
     color: var(--faint);
     font-size: var(--font-small);
@@ -2035,12 +2436,66 @@
     font-size: var(--font-small);
   }
 
+  /* Pinned to the bottom of the page while it scrolls: the rows that need
+     saving are forty lines above the button otherwise. */
   .save-row {
+    position: sticky;
+    bottom: -22px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 20px;
     margin-top: 22px;
+    padding: 12px 0 22px;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+  }
+
+  .save-row.pending .hint {
+    color: var(--accent);
+  }
+
+  .pending-restart {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--starting) 12%, transparent);
+    border-radius: var(--radius-input);
+    font-size: var(--font-small);
+  }
+
+  .pane-head.sub {
+    margin-top: 22px;
+    padding-bottom: 6px;
+  }
+
+  .pane-head h3 {
+    font-size: var(--font-body);
+    font-weight: 600;
+  }
+
+  .add-name {
+    display: flex;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .add-name input {
+    flex: 1;
+    height: var(--h-input);
+    padding: 0 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--font-body);
+  }
+
+  .add-name input:focus {
+    border-color: var(--accent);
   }
 
   .hint {

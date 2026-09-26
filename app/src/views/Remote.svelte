@@ -77,6 +77,11 @@
   let fileWhich = $state<ServerFile>("properties");
   let fileText = $state("");
   let fileBusy = $state(false);
+  /** Shown inside the editor: the page behind it is covered. */
+  let fileError = $state<string | null>(null);
+
+  /** The host whose trash button is asking "are you sure". */
+  let confirmingRemove = $state<string | null>(null);
 
   const fileName = $derived(FILES.find(([f]) => f === fileWhich)?.[1] ?? "");
 
@@ -116,6 +121,7 @@
 
   const remove = (host: RemoteHost) =>
     run(async () => {
+      confirmingRemove = null;
       await deleteRemote(host.id);
       await refresh();
     });
@@ -176,11 +182,14 @@
     fileServer = server;
     fileWhich = which;
     fileText = "";
+    fileError = null;
     fileBusy = true;
     fileOpen = true;
-    await run(async () => {
+    try {
       fileText = await readRemoteFile(host.id, server, which);
-    });
+    } catch (e) {
+      fileError = errorMessage(e);
+    }
     fileBusy = false;
   }
 
@@ -190,9 +199,9 @@
     try {
       await writeRemoteFile(fileHost.id, fileServer, fileWhich, fileText);
       fileOpen = false;
-      error = null;
+      fileError = null;
     } catch (e) {
-      error = errorMessage(e);
+      fileError = errorMessage(e);
     } finally {
       fileBusy = false;
     }
@@ -204,7 +213,7 @@
 <section class="page">
   <header>
     <div>
-      <h1>Remote</h1>
+      <h1>遠端</h1>
       <p class="sub">編輯別台電腦上的伺服器設定檔。</p>
     </div>
     <Button variant="primary" onclick={openAdd}>
@@ -248,9 +257,14 @@
           <Button onclick={() => openEdit(host)} aria-label="編輯">
             <Icon name="pencil-line" size={15} />
           </Button>
-          <Button danger onclick={() => remove(host)} aria-label="移除">
-            <Icon name="trash" size={15} />
-          </Button>
+          {#if confirmingRemove === host.id}
+            <Button onclick={() => (confirmingRemove = null)}>取消</Button>
+            <Button danger onclick={() => remove(host)}>確定移除</Button>
+          {:else}
+            <Button danger onclick={() => (confirmingRemove = host.id)} aria-label="移除">
+              <Icon name="trash" size={15} />
+            </Button>
+          {/if}
         </div>
 
         {#if host.transport === "ssh"}
@@ -403,11 +417,18 @@
 <Modal bind:open={fileOpen} title="{fileHost?.label ?? ''} · {fileName}" width={640}>
   <textarea class="editor" bind:value={fileText} spellcheck="false" disabled={fileBusy}
   ></textarea>
-  <p class="note">存檔會直接覆蓋對方電腦上的檔案。伺服器執行中的話，改動要重開才會生效。</p>
+  <p class="note">
+    存檔會直接覆蓋對方電腦上的檔案。{fileHost?.transport === "ssh"
+      ? "伺服器執行中的話，改動要重開才會生效。"
+      : "對方的伺服器執行中時不能存，請他先關掉伺服器。"}
+  </p>
+  {#if fileError}
+    <p class="error" role="alert">{fileError}</p>
+  {/if}
 
   {#snippet footer()}
     <Button onclick={() => (fileOpen = false)}>取消</Button>
-    <Button variant="primary" onclick={saveFile} disabled={fileBusy}>儲存到遠端</Button>
+    <Button variant="primary" onclick={saveFile} disabled={fileBusy || !fileText}>儲存到遠端</Button>
   {/snippet}
 </Modal>
 

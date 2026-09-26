@@ -51,6 +51,8 @@ export interface ServerSummary {
    */
   players: string[] | null;
   uptimeSecs: number | null;
+  /** Crashed, and an automatic restart is counting down. */
+  restartPending: boolean;
 }
 
 // ── per-server configuration ────────────────────────────────
@@ -72,6 +74,12 @@ export interface ServerConfig {
    * and gives up after a few tries rather than looping all night.
    */
   restartOnCrash: boolean;
+  /** The playit tunnel carrying this server's public address, by id. */
+  tunnelId: string | null;
+  /** Zip the world every time the server stops cleanly. */
+  backupOnStop: boolean;
+  /** Restart after this many hours up, warning players first. 0 is off. */
+  restartEveryHours: number;
 }
 
 /**
@@ -216,8 +224,10 @@ export type DownloadKind =
 /** One tunnel, reduced to what a person reads out loud to a friend. */
 export interface PlayitTunnel {
   id: string;
-  /** Named after the server it points at — that is how the two are matched. */
+  /** Named after the server it was made for. Cosmetic: matching is by id. */
   name: string;
+  /** Where on this machine it forwards to, when playit says. */
+  localPort: number | null;
   /** What a player types. Already carries a port when there is one to type. */
   address: string;
   /** Set when playit has switched the tunnel off, with its reason. */
@@ -271,7 +281,19 @@ export interface ModFile {
   bytes: number;
   /** Forge loads `*.jar` only; a disabled mod is the same file renamed. */
   enabled: boolean;
+  /** From the metadata inside the jar, when it has any. */
+  displayName: string | null;
+  version: string | null;
 }
+
+/** Who may join and who runs the server. */
+export interface PlayerAccess {
+  whitelistOn: boolean;
+  whitelist: string[];
+  ops: string[];
+}
+
+export type AccessList = "whitelist" | "ops";
 
 /** One saved copy of a world. */
 export interface Backup {
@@ -280,7 +302,8 @@ export interface Backup {
   bytes: number;
   /** Unix seconds. */
   createdSecs: number;
-  /** Taken automatically just before a restore, rather than asked for. */
+  /** Taken by the app (before a restore, or when the server stopped),
+   *  rather than asked for. */
   automatic: boolean;
 }
 

@@ -25,6 +25,8 @@ import {
   type Backup,
   type CrashInfo,
   type PlayitStatus,
+  type PlayerAccess,
+  type AccessList,
   type ServerFile,
   type ServerId,
   type ServerSummary,
@@ -43,6 +45,13 @@ export const listServers = () => invoke<ServerSummary[]>("list_servers");
  */
 export const createServerFromInstaller = (name: string, installer: string) =>
   invoke<ServerId>("create_server_from_installer", { name, installer });
+
+/**
+ * Create a server for one Forge version, downloading its installer first if it
+ * is not on disk yet. Download progress and installer output arrive as events.
+ */
+export const createServer = (name: string, version: string) =>
+  invoke<ServerId>("create_server", { name, version });
 
 /**
  * Adopt an installation already on disk. Nothing is copied or moved, and
@@ -100,6 +109,26 @@ export const listPlayers = (id: ServerId) =>
 export const crashReport = (id: ServerId) =>
   invoke<CrashInfo | null>("crash_report", { id });
 
+/** Open the newest crash report in the default text editor. */
+export const openCrashReport = (id: ServerId) =>
+  invoke<void>("open_crash_report", { id });
+
+/** The whitelist and the operators, from the server's own files. */
+export const playerAccess = (id: ServerId) =>
+  invoke<PlayerAccess>("player_access", { id });
+
+/** Add or remove a name. Goes through the console, so only while `online`. */
+export const setPlayerAccess = (
+  id: ServerId,
+  list: AccessList,
+  name: string,
+  allowed: boolean,
+) => invoke<void>("set_player_access", { id, list, name, allowed });
+
+/** Whitelist on or off on a running server. */
+export const setWhitelist = (id: ServerId, on: boolean) =>
+  invoke<void>("set_whitelist", { id, on });
+
 // ── console ─────────────────────────────────────────────────
 
 /** Only the lines newer than `afterSeq`. Sequences start at 1, so pass 0 for
@@ -118,6 +147,12 @@ export const startServer = (id: ServerId) => invoke<void>("start_server", { id }
  */
 export const stopServer = (id: ServerId) => invoke<void>("stop_server", { id });
 
+/** End the process now. The world is not saved. */
+export const killServer = (id: ServerId) => invoke<void>("kill_server", { id });
+
+/** Call off an automatic restart that is still counting down. */
+export const cancelRestart = (id: ServerId) =>
+  invoke<void>("cancel_restart", { id });
 
 /** Type a line into the server console. Only valid while `online`. */
 export const sendConsoleCommand = (id: ServerId, command: string) =>
@@ -166,8 +201,9 @@ export const deleteBackup = (id: ServerId, name: string) =>
   invoke<void>("delete_backup", { id, name });
 
 /**
- * Bundle the log, the crash report, the mod list and the config into one zip.
- * Resolves with its path. Nothing is uploaded — the user decides who sees it.
+ * Bundle the log, the crash report, the mod list and the config into one zip,
+ * and select it in Explorer. Resolves with its path. Nothing is uploaded — the
+ * user decides who sees it.
  */
 export const exportDiagnostics = (id: ServerId) =>
   invoke<string>("export_diagnostics", { id });
@@ -312,14 +348,18 @@ export const playitClaimUrl = () => invoke<[string, string]>("playit_claim_url")
 export const playitFinishClaim = (code: string) =>
   invoke<void>("playit_finish_claim", { code });
 
+/** Stop waiting for an approval the user is not going to give. */
+export const playitCancelClaim = () => invoke<void>("playit_cancel_claim");
+
 /** Bring the tunnel up. Its log arrives as `agentActivity` events. */
 export const playitStart = () => invoke<void>("playit_start");
 
 export const playitStop = () => invoke<void>("playit_stop");
 
 /**
- * Create a tunnel for one server. playit allocates asynchronously, so the
- * address appears in a later `playitStatus` rather than in the return value.
+ * Make sure one server has a tunnel pointing at its current port — reusing
+ * the one it already has. playit allocates asynchronously, so the address
+ * appears in a later `playitStatus` rather than in the return value.
  */
 export const playitCreateTunnel = (id: ServerId) =>
   invoke<void>("playit_create_tunnel", { id });

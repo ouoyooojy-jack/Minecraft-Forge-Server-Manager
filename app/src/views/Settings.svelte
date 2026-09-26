@@ -1,10 +1,8 @@
 <!--
-  App settings.
+  App settings: feedback, the playit.gg account, and remote access.
 
-  Only the theme so far, and it is real: it applies immediately and survives a
-  restart. The .pen's other two fields (HTTP timeout, progress rate) are
-  constants in the core with no settings module behind them yet — inputs that
-  silently discard what the user types would be worse than not showing them.
+  Everything here applies the moment it is changed — there is no save button,
+  so anything that cannot be taken back asks first.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
@@ -15,6 +13,7 @@
     getAgentSettings,
     reportIssue,
     onCoreEvent,
+    playitCancelClaim,
     playitClaimUrl,
     playitDeleteTunnel,
     playitSetAuto,
@@ -38,6 +37,15 @@
   let activity = $state<string[]>([]);
   let busy = $state(false);
   let showToken = $state(false);
+  /** The port as typed, applied only once it is a real port. */
+  let portText = $state("");
+  const portBad = $derived(!/^\d+$/.test(portText) || +portText < 1024 || +portText > 65535);
+
+  /**
+   * Which irreversible button is asking "are you sure": `unlink`, `regen`, or
+   * `tunnel:<id>`. One at a time — a second one replaces the first.
+   */
+  let confirming = $state<string | null>(null);
 
   /**
    * The report being written.
@@ -83,10 +91,17 @@
       agent = await getAgentSettings();
     } finally {
       busy = false;
+      portText = String(agent?.port ?? portText);
     }
   }
 
+  function applyPort() {
+    if (!agent || portBad || +portText === agent.port) return;
+    apply(agent.enabled, +portText);
+  }
+
   async function regenerate() {
+    confirming = null;
     busy = true;
     try {
       agent = await regenerateAgentToken();
@@ -181,7 +196,7 @@
     }, 10_000);
 
     getAgentSettings()
-      .then((s) => (agent = s))
+      .then((s) => ((agent = s), (portText = String(s.port))))
       .catch((e) => (agentError = errorMessage(e)));
 
     const unlisten = onCoreEvent((event) => {
@@ -210,7 +225,7 @@
       <Button onclick={() => (reportOpen = true)}>寫一則回報</Button>
     </div>
     <p class="sub small">
-      回報當機或啟動失敗時，先到「伺服器頁 → 設定 → 原始檔 → 匯出診斷檔」拿到 zip，
+      回報當機或啟動失敗時，先到「伺服器頁 → 伺服器設定 → 原始檔 → 匯出診斷檔」拿到 zip，
       再拖進 issue。裡面有主控台、Minecraft 的 log、當機報告和模組清單——
       也有玩家名稱，附不附上由你決定。
     </p>
@@ -239,7 +254,9 @@
             <span class="label">授權網址</span>
             <code class="token addr">{claimUrl}</code>
             <Button onclick={() => navigator.clipboard.writeText(claimUrl!)}>複製</Button>
+            <Button onclick={playitCancelClaim}>取消</Button>
           </div>
+          <p class="note">瀏覽器沒跳出來的話，複製這個網址自己貼上。不想連了就按取消。</p>
         {/if}
       {:else}
         <div class="row">
@@ -284,12 +301,31 @@
             {#if tunnel.address}
               <Button onclick={() => navigator.clipboard.writeText(tunnel.address)}>複製</Button>
             {/if}
-            <Button
-              disabled={playitBusy !== null}
-              onclick={() => playitStep("移除中", () => playitDeleteTunnel(tunnel.id))}
-            >
-              移除
-            </Button>
+            {#if confirming === `tunnel:${tunnel.id}`}
+              <Button onclick={() => (confirming = null)}>取消</Button>
+              <Button
+                danger
+                disabled={playitBusy !== null}
+                onclick={() => (
+                  (confirming = null),
+                  playitStep("移除中", () => playitDeleteTunnel(tunnel.id))
+                )}
+              >
+                確定移除
+              </Button>
+            {:else}
+              <Button
+                disabled={playitBusy !== null}
+                onclick={() => (confirming = `tunnel:${tunnel.id}`)}
+              >
+                移除
+              </Button>
+            {/if}
+            {#if confirming === `tunnel:${tunnel.id}`}
+              <span class="hint warn">
+                這個位址會馬上失效，朋友存的位址也跟著不能用。伺服器之後要再開公開連線，會拿到不同的新位址。
+              </span>
+            {/if}
             {#if tunnel.disabledReason}
               <span class="hint warn">{tunnel.disabledReason}</span>
             {/if}
@@ -305,7 +341,7 @@
 
         {#if !playit.tunnels.length && !playitWaiting.length}
           <p class="note no-tunnel">
-            還沒有公開位址。開一次伺服器就會自動建好，也可以到伺服器頁的「設定 → 連線」自己按。
+            還沒有公開位址。開一次伺服器就會自動建好，也可以到伺服器頁的「伺服器設定 → 連線」自己按。
           </p>
         {/if}
 
@@ -314,12 +350,26 @@
         {/each}
 
         <div class="row">
-          <Button disabled={playitBusy !== null} onclick={() => playitStep("解除中", playitUnlink)}>
-            解除連結
-          </Button>
-          <span class="hint">
-            只忘掉這台電腦的金鑰。隧道還留在你的 playit.gg 帳號裡，要刪要去他們的網站。
-          </span>
+          {#if confirming === "unlink"}
+            <Button onclick={() => (confirming = null)}>取消</Button>
+            <Button
+              danger
+              disabled={playitBusy !== null}
+              onclick={() => ((confirming = null), playitStep("解除中", playitUnlink))}
+            >
+              確定解除
+            </Button>
+            <span class="hint warn">
+              解除後公開位址都會停止，要再用得重新登入 playit.gg。隧道本身還留在你的帳號裡。
+            </span>
+          {:else}
+            <Button disabled={playitBusy !== null} onclick={() => (confirming = "unlink")}>
+              解除連結
+            </Button>
+            <span class="hint">
+              只忘掉這台電腦的金鑰。隧道還留在你的 playit.gg 帳號裡，要刪要去他們的網站。
+            </span>
+          {/if}
         </div>
       {/if}
 
@@ -364,13 +414,18 @@
         <label class="port">
           <span>連接埠</span>
           <input
-            type="number"
-            value={agent.port}
+            type="text"
+            inputmode="numeric"
+            class:bad={portBad}
+            bind:value={portText}
             disabled={busy}
-            onchange={(e) => apply(agent!.enabled, Number(e.currentTarget.value))}
+            onchange={applyPort}
           />
         </label>
       </div>
+      {#if portBad}
+        <p class="agent-error" role="alert">連接埠要是 1024 到 65535 之間的整數。</p>
+      {/if}
 
       <div class="row token-row">
         <span class="label">配對碼</span>
@@ -379,8 +434,16 @@
           {showToken ? "隱藏" : "顯示"}
         </Button>
         <Button onclick={() => navigator.clipboard.writeText(agent!.token)}>複製</Button>
-        <Button onclick={regenerate} disabled={busy}>換一組</Button>
+        {#if confirming === "regen"}
+          <Button onclick={() => (confirming = null)}>取消</Button>
+          <Button danger onclick={regenerate} disabled={busy}>確定換一組</Button>
+        {:else}
+          <Button onclick={() => (confirming = "regen")} disabled={busy}>換一組</Button>
+        {/if}
       </div>
+      {#if confirming === "regen"}
+        <p class="hint warn">舊的配對碼會立刻失效，已經連上的朋友要重新輸入新的。</p>
+      {/if}
 
       <p class="note">
         把配對碼和你的 VPN 位址給對方就能連。換一組之後，舊的配對碼立刻失效——那是收回權限的唯一方法。
@@ -402,8 +465,6 @@
       {/if}
     {/if}
   </div>
-
-  <p class="todo">HTTP 逾時與進度更新頻率目前是核心裡的常數，還沒有設定模組。</p>
 </section>
 
 <Modal bind:open={reportOpen} title="回報與建議" width={560}>
@@ -600,6 +661,10 @@
     user-select: text;
   }
 
+  .port input.bad {
+    border-color: var(--error);
+  }
+
   .token-row .label {
     color: var(--muted);
     font-size: var(--font-small);
@@ -669,12 +734,6 @@
     border-top: 1px solid var(--border);
     font-size: var(--font-tiny);
     color: var(--faint);
-  }
-
-  .todo {
-    margin: 0;
-    font-size: var(--font-tiny);
-    color: var(--muted);
   }
 
   /* The sentence beside a button that says what pressing it costs. Sits on the

@@ -208,7 +208,39 @@ export interface LogLine {
 
 export type DownloadKind =
   | { kind: "forgeInstaller"; version: string }
-  | { kind: "jre"; major: number };
+  | { kind: "jre"; major: number }
+  | { kind: "playitAgent" };
+
+// ── playit.gg ───────────────────────────────────────────────
+
+/** One tunnel, reduced to what a person reads out loud to a friend. */
+export interface PlayitTunnel {
+  id: string;
+  /** Named after the server it points at — that is how the two are matched. */
+  name: string;
+  /** What a player types. Already carries a port when there is one to type. */
+  address: string;
+  /** Set when playit has switched the tunnel off, with its reason. */
+  disabledReason: string | null;
+}
+
+export interface PlayitStatus {
+  /** The agent binary is on disk. */
+  installed: boolean;
+  /** A key is stored, so this machine is attached to the user's playit account. */
+  linked: boolean;
+  /** The agent process is up. Tunnels only carry traffic while it is. */
+  running: boolean;
+  /** Starting a server brings its public address up with it. */
+  auto: boolean;
+  tunnels: PlayitTunnel[];
+  /** Names of tunnels playit is still allocating an address for. */
+  pending: string[];
+  /** Messages from playit, shown verbatim. */
+  notices: string[];
+  /** Set when playit could not be reached; the rest is local knowledge only. */
+  offline: string | null;
+}
 
 export type DownloadState =
   | { kind: "running" }

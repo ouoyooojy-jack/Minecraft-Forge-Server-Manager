@@ -313,6 +313,9 @@ pub struct LogLine {
 pub enum DownloadKind {
     ForgeInstaller { version: String },
     Jre { major: u8 },
+    /// The playit.gg tunnel agent. Fetched from playit's own release rather
+    /// than shipped in the installer — see `playit.rs` for why.
+    PlayitAgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

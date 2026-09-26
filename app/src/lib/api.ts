@@ -24,6 +24,7 @@ import {
   type PropertyField,
   type Backup,
   type CrashInfo,
+  type PlayitStatus,
   type ServerFile,
   type ServerId,
   type ServerSummary,
@@ -266,13 +267,74 @@ export const downloadForge = (version: string) =>
 // ── feedback ────────────────────────────────────────────────
 
 /**
- * Open a pre-filled GitHub issue in the browser.
+ * Open a GitHub issue in the browser, carrying what the user typed.
  *
- * The URL is built in the core, so the UI cannot name a destination. Nothing
- * is sent — the user reads, edits and submits the page themselves, and no log
- * leaves the machine unless they attach one.
+ * The destination is built in the core, so the UI supplies words and never a
+ * URL. Nothing is sent from here — the user reads, edits and submits the page
+ * themselves, and no log leaves the machine unless they attach one.
  */
-export const reportIssue = () => invoke<void>("report_issue");
+export const reportIssue = (title: string, body: string) =>
+  invoke<void>("report_issue", { title, body });
+
+// ── playit.gg tunnels ───────────────────────────────────────
+
+/**
+ * Everything the tunnel UI draws: whether the agent is installed, whether this
+ * machine is linked to the user's playit account, whether it is running, and
+ * every tunnel on that account.
+ *
+ * `offline` being set means playit could not be reached — the local half of the
+ * answer is still true, so the UI keeps drawing rather than going blank.
+ */
+export const playitStatus = () => invoke<PlayitStatus>("playit_status");
+
+/**
+ * Fetch the agent from playit's own GitHub release.
+ *
+ * Not bundled in the installer: playit's terms forbid offering their service as
+ * part of a bundled product, and their own guidance is to run the program only
+ * when it came from an official source. Progress arrives on the normal download
+ * events.
+ */
+export const playitInstall = () => invoke<void>("playit_install");
+
+/**
+ * Start linking: opens playit's claim page in the user's default browser and
+ * returns `[code, url]`. Pass the code to `playitFinishClaim` to wait for the
+ * approval; the URL is only for showing, in case no browser came to the front.
+ *
+ * The user signs into playit as themselves; this app never holds an account and
+ * never sees their password.
+ */
+export const playitClaimUrl = () => invoke<[string, string]>("playit_claim_url");
+
+/** Wait for the user to approve in the browser, then store the key. */
+export const playitFinishClaim = (code: string) =>
+  invoke<void>("playit_finish_claim", { code });
+
+/** Bring the tunnel up. Its log arrives as `agentActivity` events. */
+export const playitStart = () => invoke<void>("playit_start");
+
+export const playitStop = () => invoke<void>("playit_stop");
+
+/**
+ * Create a tunnel for one server. playit allocates asynchronously, so the
+ * address appears in a later `playitStatus` rather than in the return value.
+ */
+export const playitCreateTunnel = (id: ServerId) =>
+  invoke<void>("playit_create_tunnel", { id });
+
+export const playitDeleteTunnel = (id: string) =>
+  invoke<void>("playit_delete_tunnel", { id });
+
+/** Switch "public address follows the server" on or off. */
+export const playitSetAuto = (on: boolean) => invoke<void>("playit_set_auto", { on });
+
+/**
+ * Forget this machine's key. The agent stays on the user's playit account until
+ * they remove it there.
+ */
+export const playitUnlink = () => invoke<void>("playit_unlink");
 
 // ── events ──────────────────────────────────────────────────
 

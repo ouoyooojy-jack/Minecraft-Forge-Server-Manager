@@ -222,7 +222,7 @@ impl Supervisor {
         self.reject_if_active(id)?;
         if installer.extension().and_then(|e| e.to_str()) != Some("jar") {
             return Err(CoreError::Precondition {
-                message: "請選擇有效的 Forge installer .jar 檔案。".into(),
+                message: "請選擇有效的 Forge / NeoForge installer .jar 檔案。".into(),
             });
         }
         std::fs::create_dir_all(dir)?;
@@ -552,12 +552,9 @@ fn launch_plan(dir: &Path, config: &ServerConfig) -> CoreResult<Launch> {
     }
 
     Err(CoreError::Precondition {
-        message: "找不到 run.bat 或 server.jar；請先安裝 Forge。".into(),
+        message: "找不到 run.bat 或 server.jar；請先安裝 Forge 或 NeoForge。".into(),
     })
 }
-
-/// Where Forge puts the arguments it generates, relative to the server folder.
-const FORGE_LIB: &str = "libraries/net/minecraftforge/forge";
 
 /// The JVM flags file Forge's script reads, and where this app writes `-Xmx`.
 const USER_JVM_ARGS: &str = "user_jvm_args.txt";
@@ -580,18 +577,22 @@ fn forge_args_file(dir: &Path) -> Option<String> {
     } else {
         "unix_args.txt"
     };
-    let mut builds: Vec<String> = std::fs::read_dir(dir.join(FORGE_LIB))
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().join(name).is_file())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    // A folder can hold more than one build after an upgrade. Sorting and
-    // taking the last makes the choice the newest one rather than whatever
-    // order the filesystem happened to hand back.
-    builds.sort();
+    // Forge and NeoForge write the same file under different coordinates;
+    // a folder holds one of them, so the first root with a build wins.
+    crate::forge::LOADER_LIBS.iter().find_map(|lib| {
+        let mut builds: Vec<String> = std::fs::read_dir(dir.join(lib))
+            .ok()?
+            .flatten()
+            .filter(|e| e.path().join(name).is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // A folder can hold more than one build after an upgrade. Sorting and
+        // taking the last makes the choice the newest one rather than whatever
+        // order the filesystem happened to hand back.
+        builds.sort();
 
-    Some(format!("{FORGE_LIB}/{}/{name}", builds.pop()?))
+        Some(format!("{lib}/{}/{name}", builds.pop()?))
+    })
 }
 
 /// Lift the real `java` invocation out of Forge's generated run script.
@@ -1000,6 +1001,43 @@ mod tests {
     #[test]
     fn jvm_args_from_empty_file() {
         assert_eq!(merge_jvm_args("", 2048), "-Xms2048M\n-Xmx2048M\n");
+    }
+
+    #[test]
+    fn the_arguments_file_is_found_under_either_loader() {
+        let name = if cfg!(windows) {
+            "win_args.txt"
+        } else {
+            "unix_args.txt"
+        };
+
+        // Forge: the layout this app has always handled.
+        let forge = tempfile::tempdir().unwrap();
+        let build = forge
+            .path()
+            .join("libraries/net/minecraftforge/forge/1.20.1-47.4.10");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join(name), "").unwrap();
+        assert_eq!(
+            forge_args_file(forge.path()),
+            Some(format!(
+                "libraries/net/minecraftforge/forge/1.20.1-47.4.10/{name}"
+            ))
+        );
+
+        // NeoForge: same file, different coordinates, no dash in the build.
+        let neo = tempfile::tempdir().unwrap();
+        let build = neo.path().join("libraries/net/neoforged/neoforge/21.1.249");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join(name), "").unwrap();
+        assert_eq!(
+            forge_args_file(neo.path()),
+            Some(format!("libraries/net/neoforged/neoforge/21.1.249/{name}"))
+        );
+
+        // Neither: not an install this app can launch from an arguments file.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(forge_args_file(empty.path()), None);
     }
 
     #[test]

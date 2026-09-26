@@ -39,6 +39,8 @@
     listServers,
     onCoreEvent,
     openServerFolder,
+    playitCreateTunnel,
+    playitStatus,
     readServerFile,
     saveProperties,
     saveServerConfig,
@@ -55,6 +57,7 @@
     type Fix,
     type LogLine,
     type ModFile,
+    type PlayitStatus,
     type PropertyField,
     type PropertyGroup,
     type ServerConfig,
@@ -194,6 +197,37 @@
         (f) => f.kind === "int" && f.key in edits && !/^-?\d+$/.test(edits[f.key]),
       ),
   );
+
+  /**
+   * The playit.gg tunnel for this server, for the 連線 section.
+   *
+   * Matched by name because that is what the core names a tunnel it creates —
+   * the local port it points at is not in playit's payload under any
+   * documented key, and the name is the half this app owns.
+   */
+  let playit = $state<PlayitStatus | null>(null);
+  let tunnelBusy = $state(false);
+  const tunnel = $derived(playit?.tunnels.find((t) => t.name === config?.name) ?? null);
+  /** Created, but playit has not allocated the hostname yet. */
+  const tunnelPending = $derived(playit?.pending.includes(config?.name ?? "") ?? false);
+
+  /** Flips for a moment after a copy, so a silent clipboard write has a reply. */
+  let copied = $state(false);
+
+  function copyInvite() {
+    const address = tunnel?.address;
+    if (!address) return;
+    navigator.clipboard.writeText(address);
+    copied = true;
+    setTimeout(() => (copied = false), 1600);
+  }
+
+  const refreshPlayit = () =>
+    playitStatus()
+      .then((s) => (playit = s))
+      // Not surfaced: the section still has to draw its own rows, and the
+      // address row already says what to do when there is no tunnel.
+      .catch(() => (playit = null));
 
   const valueOf = (f: PropertyField) => edits[f.key] ?? f.value;
 
@@ -428,6 +462,22 @@
     }
   }
 
+  // Read on the way into the 連線 section rather than on mount: a tunnel can be
+  // started, stopped or deleted on playit's own site, so what matters is that
+  // it is fresh when it is looked at.
+  $effect(() => {
+    if (section === "connection") void refreshPlayit();
+  });
+
+  async function createTunnel() {
+    tunnelBusy = true;
+    await run(async () => {
+      await playitCreateTunnel(id);
+      await refreshPlayit();
+    });
+    tunnelBusy = false;
+  }
+
   const refresh = () =>
     run(async () => {
       all = await listServers();
@@ -560,6 +610,9 @@
     refresh().then(() => {
       if (online) run(() => sendConsoleCommand(id, "list"));
     });
+    // The copy button lives in the header, so the tunnel has to be known
+    // before anyone opens the 連線 section.
+    void refreshPlayit();
     loadBackups();
     loadPlayers();
     loadCrash();
@@ -592,6 +645,10 @@
         // The crash report only exists once the process is gone, so this is
         // the earliest moment there is anything to read.
         if (event.state.kind === "crashed") loadCrash();
+        // A start may have opened a public address on its way up. Re-read it
+        // once the address has had a moment to be allocated, so the copy
+        // button in the header appears without being gone looking for.
+        if (event.state.kind === "starting") setTimeout(refreshPlayit, 4000);
         // Only a clean stop leads back to a start. A crash means the restart
         // already failed, and relaunching would loop on the same fault.
         if (restarting && (event.state.kind === "stopped" || event.state.kind === "crashed")) {
@@ -675,6 +732,12 @@
         <Icon name="rotate-cw" size={14} />
         {restarting ? "重啟中…" : "重啟"}
       </Button>
+      {#if tunnel?.address}
+        <Button onclick={copyInvite}>
+          <Icon name={copied ? "check" : "copy"} size={14} />
+          {copied ? "已複製" : "複製公開位址"}
+        </Button>
+      {/if}
       <Button onclick={() => run(() => openServerFolder(id))} aria-label="開啟資料夾">
         <Icon name="folder-open" size={16} />
       </Button>
@@ -1048,6 +1111,41 @@
                 <input class="tabular" type="number" min="512" max="65536" bind:value={memory} />
               </span>
             </label>
+          {/if}
+
+          {#if section === "connection"}
+            <div class="row">
+              <span class="label">
+                <span class="name">公開位址</span>
+                <code>playit.gg</code>
+                <small>
+                  {#if tunnel?.address}
+                    朋友在「多人遊戲 → 直接連線」貼這個位址就能進來，不用加通訊埠，也不用設定路由器。{#if !playit?.running}
+                      隧道現在沒在跑，要到「設定 → 公開連線」按啟動才連得進來。{/if}
+                  {:else if tunnel || tunnelPending}
+                    playit.gg 還在配置位址，幾秒後按重新整理。
+                  {:else if playit?.linked}
+                    建一條 playit.gg 隧道，讓不在同一個網路的人也連得進來。
+                  {:else}
+                    要先到「設定 → 公開連線」下載代理程式並連結 playit.gg 帳號。
+                  {/if}
+                </small>
+              </span>
+              <span class="control wide">
+                {#if tunnel?.address}
+                  <code class="addr">{tunnel.address}</code>
+                  <Button onclick={() => navigator.clipboard.writeText(tunnel!.address)}>
+                    複製
+                  </Button>
+                {:else if tunnel || tunnelPending}
+                  <Button onclick={refreshPlayit}>重新整理</Button>
+                {:else if playit?.linked}
+                  <Button onclick={createTunnel} disabled={tunnelBusy}>
+                    {tunnelBusy ? "建立中…" : "建立公開位址"}
+                  </Button>
+                {/if}
+              </span>
+            </div>
           {/if}
 
           {#each shown as field (field.key)}
@@ -1755,6 +1853,26 @@
     display: flex;
     justify-content: flex-end;
     color: var(--muted);
+  }
+
+  /* A hostname and its copy button do not fit in a field's width, and the
+     address is read rather than typed. */
+  .control.wide {
+    width: 320px;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .control .addr {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--font-small);
+    color: var(--fg);
+    user-select: text;
   }
 
   .control input,

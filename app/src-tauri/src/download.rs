@@ -342,6 +342,7 @@ impl DownloadKind {
         match self {
             DownloadKind::ForgeInstaller { version } => version.clone(),
             DownloadKind::Jre { major } => format!("JRE {major}"),
+            DownloadKind::PlayitAgent => "playit 代理程式".to_owned(),
         }
     }
 }

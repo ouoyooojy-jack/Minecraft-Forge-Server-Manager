@@ -1,6 +1,6 @@
 [package]
 name = "mc-server-manager"
-version = "0.1.2"
+version = "0.1.3"
 description = "Minecraft Forge server manager"
 edition = "2021"
 rust-version = "1.77"

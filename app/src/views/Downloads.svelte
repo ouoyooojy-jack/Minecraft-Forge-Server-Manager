@@ -58,9 +58,14 @@
   const totalBytes = $derived(files.reduce((sum, f) => sum + f.bytes, 0));
 
   function label(d: DownloadProgress) {
-    return d.what.kind === "forgeInstaller"
-      ? `Forge ${d.what.version}`
-      : `JRE ${d.what.major}`;
+    switch (d.what.kind) {
+      case "forgeInstaller":
+        return `Forge ${d.what.version}`;
+      case "jre":
+        return `JRE ${d.what.major}`;
+      case "playitAgent":
+        return "playit 代理程式";
+    }
   }
 
   /** `forge-1.20.1-47.2.0-installer.jar` → `Forge 1.20.1-47.2.0`. */

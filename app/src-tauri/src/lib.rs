@@ -11,6 +11,7 @@ mod download;
 mod forge;
 mod java;
 mod logbuf;
+mod playit;
 mod properties;
 mod registry;
 mod remote;
@@ -30,6 +31,7 @@ use agent::{Agent, AgentSettings};
 use download::Downloader;
 use forge::Forge;
 use java::Java;
+use playit::Playit;
 use registry::Registry;
 use remote::Remotes;
 use supervisor::Supervisor;
@@ -52,6 +54,8 @@ pub struct AppState {
     forge: Forge,
     /// Locates a JRE, and unpacks one when the machine has none.
     java: Java,
+    /// The playit.gg tunnel agent, for servers that cannot be port-forwarded.
+    playit: Playit,
     /// Other people's machines.
     remotes: Remotes,
     /// This machine's own listener, when the user has switched it on. `None`
@@ -749,11 +753,114 @@ async fn install_java(state: State<'_, AppState>, major: u8) -> CoreResult<()> {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Commands — playit.gg tunnels
+// ─────────────────────────────────────────────────────────────
+
+/// How long the user gets to sign in and approve the link in their browser.
+/// Generous on purpose: this includes registering an account for the first time.
+const PLAYIT_CLAIM_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[tauri::command]
+async fn playit_status(state: State<'_, AppState>) -> CoreResult<playit::PlayitStatus> {
+    Ok(state.playit.status().await)
+}
+
+/// Fetch the agent from playit's own release. Progress rides the normal
+/// download events, so it appears wherever a Forge or JRE download would.
+#[tauri::command]
+async fn playit_install(state: State<'_, AppState>) -> CoreResult<()> {
+    let dest = state.playit.exe_path();
+    state
+        .downloader
+        .fetch(DownloadKind::PlayitAgent, state.playit.url(), dest)
+        .await?;
+    Ok(())
+}
+
+/// Step one of linking: open the claim page in the user's own browser.
+///
+/// The sign-in happens on playit's site, in a real browser, so this app never
+/// sees an account password. The URL is returned alongside the code because
+/// `explorer` reports nothing back — if no browser opened, the UI can still
+/// show the address to type by hand. The code goes to the UI rather than into
+/// core state so that an abandoned claim leaves nothing behind to clean up.
+#[tauri::command]
+fn playit_claim_url(state: State<'_, AppState>) -> CoreResult<(String, String)> {
+    let (code, url) = state.playit.claim_url();
+    std::process::Command::new("explorer").arg(&url).spawn()?;
+    Ok((code, url))
+}
+
+/// Step two: block until the user approves in the browser, then store the key.
+#[tauri::command]
+async fn playit_finish_claim(state: State<'_, AppState>, code: String) -> CoreResult<()> {
+    state
+        .playit
+        .finish_claim(&code, PLAYIT_CLAIM_TIMEOUT)
+        .await
+}
+
+/// Start the tunnel agent. Its log goes to the same activity feed as the remote
+/// listener's, which is where someone looks when a tunnel is not working.
+#[tauri::command]
+fn playit_start(app: AppHandle, state: State<'_, AppState>) -> CoreResult<()> {
+    let handle = app.clone();
+    state.playit.start(move |line| {
+        emit(
+            &handle,
+            CoreEvent::AgentActivity {
+                line: format!("playit: {line}"),
+            },
+        );
+    })
+}
+
+#[tauri::command]
+fn playit_stop(state: State<'_, AppState>) {
+    state.playit.stop();
+}
+
+/// Create a tunnel for one server, named after it.
+///
+/// The name is how a tunnel is matched back to a server later, so it comes from
+/// the registry rather than from the UI — a caller that could choose the name
+/// could also point a tunnel at a server it does not name.
+#[tauri::command]
+async fn playit_create_tunnel(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+    let (name, port) = {
+        let config = state.registry.load_config(&id)?;
+        // server.properties does not exist until the first run, and the
+        // default is the one Minecraft will write into it.
+        (config.name, server_port(&state, &id).unwrap_or(DEFAULT_MC_PORT))
+    };
+    state.playit.create_tunnel(&name, port).await
+}
+
+#[tauri::command]
+async fn playit_delete_tunnel(state: State<'_, AppState>, id: String) -> CoreResult<()> {
+    state.playit.delete_tunnel(&id).await
+}
+
+/// Switch "public address follows the server" on or off.
+#[tauri::command]
+fn playit_set_auto(state: State<'_, AppState>, on: bool) -> CoreResult<()> {
+    state.playit.set_auto(on)
+}
+
+/// Forget this machine's key. The agent stays on the user's playit account
+/// until they remove it there; this app does not delete other people's account
+/// resources on its own.
+#[tauri::command]
+fn playit_unlink(state: State<'_, AppState>) -> CoreResult<()> {
+    state.playit.unlink()
+}
+
+// ─────────────────────────────────────────────────────────────
 // Commands — process control
 // ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn start_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
+async fn start_server(app: AppHandle, state: State<'_, AppState>, id: ServerId) -> CoreResult<()> {
     let config = state.registry.load_config(&id)?;
     let dir = state.registry.dir_of(&id);
     if !state.registry.eula_accepted(&id) {
@@ -763,7 +870,62 @@ async fn start_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()
     }
     port_is_free(&state, &id)?;
     let config = resolve_java(&state, &config, config.mc_version.as_deref())?;
+    open_tunnel_if_wanted(&app, &state, &id, &config.name).await;
     state.supervisor.start(&id, &dir, &config).await
+}
+
+/// Bring this server's public address up alongside it, if the user asked for
+/// that in settings.
+///
+/// Deliberately infallible from the caller's point of view: playit being
+/// unreachable is not a reason to refuse to start a server that the people on
+/// the same network can still join. The failure goes to the activity feed,
+/// which is where a missing public address is investigated.
+async fn open_tunnel_if_wanted(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    id: &ServerId,
+    name: &str,
+) {
+    if !state.playit.auto() || !state.playit.linked() {
+        return;
+    }
+    let port = server_port(state, id).unwrap_or(DEFAULT_MC_PORT);
+    let handle = app.clone();
+    let log = move |line: String| {
+        emit(
+            &handle,
+            CoreEvent::AgentActivity {
+                line: format!("playit: {line}"),
+            },
+        );
+    };
+    if let Err(e) = state.playit.ensure(name, port, log).await {
+        emit(
+            app,
+            CoreEvent::AgentActivity {
+                line: format!("playit: 公開位址沒開起來：{e}"),
+            },
+        );
+    }
+}
+
+/// What Minecraft listens on when `server.properties` does not say otherwise.
+const DEFAULT_MC_PORT: u16 = 25565;
+
+/// The port this server answers on, as the file has it.
+///
+/// `None` means the file has no usable value — it does not exist yet, or the
+/// line is empty or zero. Callers decide whether that is a refusal or the
+/// default; a tunnel wants the default, a collision check wants to stay quiet.
+fn server_port(state: &State<'_, AppState>, id: &ServerId) -> Option<u16> {
+    state
+        .registry
+        .read_raw_properties(id)
+        .ok()?
+        .get("server-port")
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
 }
 
 /// Refuse a start that is going to fail on the port.
@@ -777,13 +939,7 @@ async fn start_server(state: State<'_, AppState>, id: ServerId) -> CoreResult<()
 /// file is written on first run, and refusing to start it would be worse than
 /// letting Minecraft report the collision itself.
 fn port_is_free(state: &State<'_, AppState>, id: &ServerId) -> CoreResult<()> {
-    let Some(port) = state
-        .registry
-        .read_raw_properties(id)?
-        .get("server-port")
-        .and_then(|v| v.trim().parse::<u16>().ok())
-        .filter(|p| *p != 0)
-    else {
+    let Some(port) = server_port(state, id) else {
         return Ok(());
     };
 
@@ -1010,36 +1166,53 @@ fn now_stamp() -> u64 {
 /// Where bugs and ideas go.
 const REPO: &str = "https://github.com/ouoyooojy-jack/Minecraft-Forge-Server-Manager";
 
-/// Open a pre-filled GitHub issue in the browser.
+/// How much text the issue body may carry.
 ///
-/// One entry point, not two. Whether something is a bug or a missing feature
-/// is a judgement the person reporting it should not have to make before they
-/// can start typing — plenty of reports are both, and picking the wrong door
-/// is a reason not to bother. The template asks which it is on the first line,
-/// where it can be changed after the fact.
+/// The whole report travels in a URL, and percent-encoded Chinese costs nine
+/// bytes a character. Browsers and GitHub both give up somewhere past 8 KB, and
+/// they give up by silently truncating or showing an error page — so this is
+/// capped here, where the UI can say so, rather than discovered by someone
+/// whose long bug report vanished.
+const REPORT_MAX_CHARS: usize = 1200;
+
+/// Open a GitHub issue in the browser, pre-filled with what the user wrote.
 ///
-/// Pre-filled because the follow-up questions are always the same ones, and an
-/// empty text box gets an empty answer.
+/// The words are theirs. This adds the version and the environment underneath —
+/// the two things every report needs and nobody remembers to include — and
+/// nothing else.
 ///
 /// Nothing is sent from here: this opens a page the user then reads, edits and
 /// submits themselves. Their log is not attached and never leaves the machine
 /// unless they attach the diagnostics bundle by hand.
 #[tauri::command]
-fn report_issue() -> CoreResult<()> {
-    let body = format!(
-        "### 這是\n- [ ] 問題／Bug\n- [ ] 建議\n\n\
-         ### 說明\n發生了什麼，或你想要什麼。\n\n\
-         ### 重現步驟（回報問題時填）\n1. \n2. \n3. \n\n\
-         ### 預期 / 實際\n\n\n\
-         ### 診斷檔（回報當機或啟動失敗時）\n\
-         伺服器頁 → 設定 → 原始檔 → 匯出診斷檔，把 zip 拖進這裡。\n\n\
-         ---\n程式版本：{}\n系統：Windows\n",
+fn report_issue(title: String, body: String) -> CoreResult<()> {
+    let title = title.trim();
+    let body = body.trim();
+    if title.is_empty() || body.is_empty() {
+        return Err(CoreError::Precondition {
+            message: "標題和內容都要填。".into(),
+        });
+    }
+    if title.chars().count() + body.chars().count() > REPORT_MAX_CHARS {
+        return Err(CoreError::Precondition {
+            message: format!("內容太長，請縮到 {REPORT_MAX_CHARS} 字以內再送出。"),
+        });
+    }
+
+    let full = format!(
+        "{body}
+
+---
+程式版本：{}
+系統：Windows
+",
         env!("CARGO_PKG_VERSION")
     );
-
-    // No title: the first thing the user types should be the summary, and a
-    // placeholder there is a placeholder that gets submitted.
-    let url = format!("{REPO}/issues/new?body={}", percent_encode(&body));
+    let url = format!(
+        "{REPO}/issues/new?title={}&body={}",
+        percent_encode(title),
+        percent_encode(&full)
+    );
     // Explorer hands an http(s) URL to the default browser, the same way it
     // hands a path to a file manager.
     std::process::Command::new("explorer").arg(&url).spawn()?;
@@ -1315,6 +1488,10 @@ fn stop_everything_then_exit(app: &AppHandle) {
         // ponytail: polling, because the supervisor has no "all stopped"
         // signal and one 200ms tick during shutdown does not justify a
         // broadcast channel. Swap it for one if anything else waits here.
+        // The tunnel goes down first. A public address that still resolves
+        // to a server being shut down is worse than one that stops answering.
+        app.state::<AppState>().playit.stop();
+
         let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
         while std::time::Instant::now() < deadline {
             if app.state::<AppState>().supervisor.active().is_empty() {
@@ -1362,6 +1539,7 @@ pub fn run() {
                 downloader,
                 forge: Forge::new()?,
                 java: Java::new(data_dir.join("java"))?,
+                playit: Playit::new(playit::root(&data_dir))?,
                 remotes: Remotes::new(&data_dir)?,
                 running_agent: std::sync::Mutex::new(None),
                 restart_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1458,6 +1636,16 @@ pub fn run() {
             delete_download,
             list_forge_versions,
             download_forge,
+            playit_status,
+            playit_install,
+            playit_claim_url,
+            playit_finish_claim,
+            playit_start,
+            playit_stop,
+            playit_create_tunnel,
+            playit_delete_tunnel,
+            playit_set_auto,
+            playit_unlink,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

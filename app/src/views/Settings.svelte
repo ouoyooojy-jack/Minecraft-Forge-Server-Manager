@@ -10,14 +10,24 @@
   import { onMount } from "svelte";
 
   import Button from "../lib/Button.svelte";
+  import Modal from "../lib/Modal.svelte";
   import {
     getAgentSettings,
     reportIssue,
     onCoreEvent,
+    playitClaimUrl,
+    playitDeleteTunnel,
+    playitSetAuto,
+    playitFinishClaim,
+    playitInstall,
+    playitStart,
+    playitStatus,
+    playitStop,
+    playitUnlink,
     regenerateAgentToken,
     setAgentSettings,
   } from "../lib/api";
-  import { errorMessage, type AgentSettings } from "../lib/types";
+  import { errorMessage, type AgentSettings, type PlayitStatus } from "../lib/types";
 
   /** How many recent connections to keep on screen. Enough to see what just
    *  happened, not a log file. */
@@ -28,6 +38,38 @@
   let activity = $state<string[]>([]);
   let busy = $state(false);
   let showToken = $state(false);
+
+  /**
+   * The report being written.
+   *
+   * Composed here rather than on GitHub's page, because the page is where
+   * people arrive already annoyed and leave without typing. A box in the app,
+   * at the moment the thing went wrong, gets an actual sentence.
+   */
+  let reportOpen = $state(false);
+  let reportTitle = $state("");
+  let reportBody = $state("");
+  let reportError = $state<string | null>(null);
+
+  /** Matches `REPORT_MAX_CHARS` in the core, which is where it is enforced —
+   *  this only makes the count visible while typing. */
+  const REPORT_MAX = 1200;
+  const reportLength = $derived(reportTitle.trim().length + reportBody.trim().length);
+  const reportReady = $derived(
+    reportTitle.trim() !== "" && reportBody.trim() !== "" && reportLength <= REPORT_MAX,
+  );
+
+  async function sendReport() {
+    try {
+      await reportIssue(reportTitle, reportBody);
+      reportOpen = false;
+      reportTitle = "";
+      reportBody = "";
+      reportError = null;
+    } catch (e) {
+      reportError = errorMessage(e);
+    }
+  }
 
   async function apply(enabled: boolean, port: number) {
     busy = true;
@@ -56,7 +98,88 @@
     }
   }
 
+  /**
+   * playit.gg state.
+   *
+   * `null` until the first status call comes back. Every button below refreshes
+   * it afterwards rather than guessing the new state, because the agent and the
+   * tunnel list live outside this app — playit's site can change either.
+   */
+  let playit = $state<PlayitStatus | null>(null);
+  let playitError = $state<string | null>(null);
+  let playitBusy = $state<string | null>(null);
+  /** Shown while the browser is open, so the page is findable if it did not
+   *  come to the front by itself. */
+  let claimUrl = $state<string | null>(null);
+  /** Which step of the one-button setup is in flight, for the button's label.
+   *  Three commands behind one press is three different waits. */
+  let playitStage = $state("");
+
+  /** Addresses playit has not finished allocating yet. Tunnel creation returns
+   *  before the hostname exists, so a tunnel appears here first. */
+  const playitWaiting = $derived(playit?.pending ?? []);
+
+  async function refreshPlayit() {
+    try {
+      playit = await playitStatus();
+    } catch (e) {
+      playitError = errorMessage(e);
+    }
+  }
+
+  /** Run one playit step with the section's buttons disabled and the failure
+   *  shown in one place. `label` is what is in flight, for the button text. */
+  async function playitStep(label: string, step: () => Promise<void>) {
+    playitBusy = label;
+    playitError = null;
+    try {
+      await step();
+    } catch (e) {
+      playitError = errorMessage(e);
+    } finally {
+      playitBusy = null;
+      playitStage = "";
+      claimUrl = null;
+      await refreshPlayit();
+    }
+  }
+
+  /**
+   * One button: download the agent, link the account, start the tunnel, and
+   * switch on "public address follows the server".
+   *
+   * Every step is skipped when it is already done, so pressing it again after a
+   * failure resumes instead of repeating. The only part that cannot be
+   * automated is the sign-in, which happens on playit's own site — this app
+   * must not hold anybody's playit account.
+   */
+  function setUpPlayit() {
+    return playitStep("設定中", async () => {
+      if (!playit?.installed) {
+        playitStage = "下載代理程式…";
+        await playitInstall();
+      }
+      if (!playit?.linked) {
+        playitStage = "等你在瀏覽器裡按同意…";
+        const [code, url] = await playitClaimUrl();
+        claimUrl = url;
+        await playitFinishClaim(code);
+      }
+      playitStage = "啟動隧道…";
+      await playitStart();
+      await playitSetAuto(true);
+    });
+  }
+
   onMount(() => {
+    refreshPlayit();
+    // Tunnel addresses are allocated on playit's side after the request
+    // returns, so the list has to be re-read rather than waited on. Only while
+    // linked: with no key there is nothing to ask about.
+    const timer = setInterval(() => {
+      if (playit?.linked && !playitBusy) refreshPlayit();
+    }, 10_000);
+
     getAgentSettings()
       .then((s) => (agent = s))
       .catch((e) => (agentError = errorMessage(e)));
@@ -66,7 +189,10 @@
       const stamp = new Date().toLocaleTimeString("zh-TW", { hour12: false });
       activity = [`${stamp} ${event.line}`, ...activity].slice(0, ACTIVITY_LINES);
     });
-    return () => void unlisten.then((fn) => fn());
+    return () => {
+      clearInterval(timer);
+      void unlisten.then((fn) => fn());
+    };
   });
 
 </script>
@@ -77,17 +203,141 @@
   <div class="setting">
     <h2>回報與建議</h2>
     <p class="sub">
-      問題和建議都走同一個入口，表單第一行才分。在 GitHub 上開一則 issue，
-      版本和該回答的問題都會先填好。送出前你會看到全部內容，
-      沒有任何東西是從這裡自動傳出去的。
+      在這裡寫，按下送出會開啟 GitHub 並把你寫的內容填好，程式版本也會附在後面。
+      送出前你會看到全部內容，沒有任何東西是從這裡自動傳出去的。
     </p>
     <div class="feedback">
-      <Button onclick={reportIssue}>開一則 issue</Button>
+      <Button onclick={() => (reportOpen = true)}>寫一則回報</Button>
     </div>
     <p class="sub small">
       回報當機或啟動失敗時，先到「伺服器頁 → 設定 → 原始檔 → 匯出診斷檔」拿到 zip，
       再拖進 issue。裡面有主控台、Minecraft 的 log、當機報告和模組清單——
       也有玩家名稱，附不附上由你決定。
+    </p>
+  </div>
+
+  <div class="setting">
+    <h2>公開連線（playit.gg）</h2>
+    <p class="sub">
+      不用設定路由器的通訊埠轉發，也不用管中華電信給你的是不是真實 IP：由這台電腦主動連出去，
+      朋友只要輸入一個網址就能進來。用的是 playit.gg 的免費隧道服務，連線會經過他們的伺服器。
+    </p>
+
+    {#if playit}
+      {#if !playit.installed || !playit.linked}
+        <div class="row">
+          <Button variant="primary" disabled={playitBusy !== null} onclick={setUpPlayit}>
+            {playitStage || "開啟公開連線"}
+          </Button>
+          <span class="hint">
+            按一次就好：下載 playit 的代理程式、開瀏覽器讓你在 playit.gg 註冊或登入一次、
+            啟動隧道，之後每次開伺服器都會自動有公開位址。密碼不會經過這個程式。
+          </span>
+        </div>
+        {#if claimUrl}
+          <div class="row token-row">
+            <span class="label">授權網址</span>
+            <code class="token addr">{claimUrl}</code>
+            <Button onclick={() => navigator.clipboard.writeText(claimUrl!)}>複製</Button>
+          </div>
+        {/if}
+      {:else}
+        <div class="row">
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={playit.auto}
+              disabled={playitBusy !== null}
+              onchange={(e) =>
+                playitStep("設定中", () => playitSetAuto(e.currentTarget.checked))}
+            />
+            <span>{playit.auto ? "開伺服器時自動開公開位址" : "只在手動按下時開"}</span>
+          </label>
+        </div>
+
+        <div class="row">
+          {#if playit.running}
+            <Button disabled={playitBusy !== null} onclick={() => playitStep("停止中", playitStop)}>
+              停止隧道
+            </Button>
+            <span class="hint running">執行中，下面的位址現在可以連。</span>
+          {:else}
+            <Button
+              variant="primary"
+              disabled={playitBusy !== null}
+              onclick={() => playitStep("啟動中", playitStart)}
+            >
+              啟動隧道
+            </Button>
+            <span class="hint">
+              {playit.auto
+                ? "沒啟動的時候公開位址連不進來，不過下次開伺服器會自己啟動。"
+                : "沒啟動的時候，公開位址連不進來。"}
+            </span>
+          {/if}
+        </div>
+
+        {#each playit.tunnels as tunnel (tunnel.id)}
+          <div class="row token-row">
+            <span class="label">{tunnel.name}</span>
+            <code class="token addr">{tunnel.address || "配置中…"}</code>
+            {#if tunnel.address}
+              <Button onclick={() => navigator.clipboard.writeText(tunnel.address)}>複製</Button>
+            {/if}
+            <Button
+              disabled={playitBusy !== null}
+              onclick={() => playitStep("移除中", () => playitDeleteTunnel(tunnel.id))}
+            >
+              移除
+            </Button>
+            {#if tunnel.disabledReason}
+              <span class="hint warn">{tunnel.disabledReason}</span>
+            {/if}
+          </div>
+        {/each}
+
+        {#each playitWaiting as name (name)}
+          <div class="row token-row">
+            <span class="label">{name}</span>
+            <code class="token addr">playit.gg 還在配置位址…</code>
+          </div>
+        {/each}
+
+        {#if !playit.tunnels.length && !playitWaiting.length}
+          <p class="note no-tunnel">
+            還沒有公開位址。開一次伺服器就會自動建好，也可以到伺服器頁的「設定 → 連線」自己按。
+          </p>
+        {/if}
+
+        {#each playit.notices as notice (notice)}
+          <p class="hint warn">{notice}</p>
+        {/each}
+
+        <div class="row">
+          <Button disabled={playitBusy !== null} onclick={() => playitStep("解除中", playitUnlink)}>
+            解除連結
+          </Button>
+          <span class="hint">
+            只忘掉這台電腦的金鑰。隧道還留在你的 playit.gg 帳號裡，要刪要去他們的網站。
+          </span>
+        </div>
+      {/if}
+
+      {#if playit.offline}
+        <p class="hint warn">連不上 playit.gg：{playit.offline}</p>
+      {/if}
+    {/if}
+
+    {#if playitError}
+      <p class="agent-error" role="alert">{playitError}</p>
+    {/if}
+
+    <p class="note">
+      隧道服務由 <a href="https://playit.gg" target="_blank" rel="noreferrer">playit.gg</a> 提供，
+      不是這個程式的一部分；用它就等於接受
+      <a href="https://playit.gg/terms" target="_blank" rel="noreferrer">playit.gg 的服務條款</a>。
+      代理程式是按下按鈕時才從 playit 官方下載的，帳號是你自己的，免費方案的流量與速度限制由他們決定。
+      在意延遲或不想讓流量經過第三方，就改用 Radmin VPN 之類的虛擬網路，讓大家在同一個網段裡直連。
     </p>
   </div>
 
@@ -156,7 +406,97 @@
   <p class="todo">HTTP 逾時與進度更新頻率目前是核心裡的常數，還沒有設定模組。</p>
 </section>
 
+<Modal bind:open={reportOpen} title="回報與建議" width={560}>
+  <div class="report">
+    <label class="field">
+      <span>一句話說明</span>
+      <input
+        bind:value={reportTitle}
+        placeholder="例：關掉視窗後伺服器沒有留在系統匣"
+        maxlength="120"
+      />
+    </label>
+
+    <label class="field">
+      <span>詳細描述</span>
+      <textarea
+        bind:value={reportBody}
+        rows="10"
+        spellcheck="false"
+        placeholder={"發生了什麼？\n你原本預期會怎樣？\n怎麼重現？\n\n如果是建議：想要什麼功能，現在是怎麼將就的？"}
+      ></textarea>
+    </label>
+
+    {#if reportError}
+      <p class="report-error" role="alert">{reportError}</p>
+    {/if}
+  </div>
+
+  {#snippet footer()}
+    <span class="count" class:over={reportLength > REPORT_MAX}>
+      {reportLength} / {REPORT_MAX}
+    </span>
+    <Button onclick={() => (reportOpen = false)}>取消</Button>
+    <Button variant="primary" onclick={sendReport} disabled={!reportReady}>
+      在 GitHub 開啟
+    </Button>
+  {/snippet}
+</Modal>
+
 <style>
+  .report {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-field);
+  }
+
+  .report .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .report .field > span {
+    color: var(--muted);
+    font-size: var(--font-small);
+  }
+
+  .report input,
+  .report textarea {
+    padding: 9px 11px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-input);
+    color: var(--fg);
+    font: inherit;
+    font-size: var(--font-body);
+    line-height: 1.7;
+    resize: none;
+  }
+
+  .report input:focus,
+  .report textarea:focus {
+    border-color: var(--accent);
+  }
+
+  .report-error {
+    color: var(--error);
+    font-size: var(--font-small);
+  }
+
+  /* Sits at the left of the footer, so the two buttons stay where the eye
+     already expects them. */
+  .count {
+    flex: 1;
+    color: var(--faint);
+    font-size: var(--font-small);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .count.over {
+    color: var(--error);
+  }
+
   .feedback {
     display: flex;
     gap: 10px;
@@ -323,140 +663,6 @@
     color: var(--muted);
   }
 
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-top: 14px;
-  }
-
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: var(--font-body);
-  }
-
-  .toggle input {
-    appearance: none;
-    width: 39px;
-    height: 22px;
-    border-radius: var(--radius-pill);
-    background: var(--wash-2);
-    transition: background-color 140ms var(--ease);
-  }
-
-  .toggle input::after {
-    content: "";
-    display: block;
-    width: 16px;
-    height: 16px;
-    margin: 3px;
-    border-radius: 50%;
-    background: var(--surface);
-    transition: transform 140ms var(--ease);
-  }
-
-  .toggle input:checked {
-    background: var(--accent);
-  }
-
-  .toggle input:checked::after {
-    transform: translateX(17px);
-  }
-
-  .port {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--muted);
-    font-size: var(--font-small);
-  }
-
-  .port input,
-  .token {
-    height: 34px;
-    padding: 0 12px;
-    display: inline-flex;
-    align-items: center;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-input);
-    color: var(--fg);
-    font-family: var(--font-mono);
-    font-size: var(--font-small);
-  }
-
-  .port input {
-    width: 96px;
-    user-select: text;
-  }
-
-  .token-row .label {
-    color: var(--muted);
-    font-size: var(--font-small);
-  }
-
-  .token {
-    letter-spacing: 0.12em;
-    user-select: text;
-  }
-
-  .agent-error {
-    margin-top: 12px;
-    padding: 10px 12px;
-    background: color-mix(in srgb, var(--error) 10%, transparent);
-    border-radius: var(--radius-input);
-    color: var(--error);
-    font-size: var(--font-small);
-  }
-
-  .activity {
-    margin-top: 16px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border);
-  }
-
-  .activity h3 {
-    color: var(--muted);
-    font-size: var(--font-small);
-    font-weight: 500;
-  }
-
-  .activity ul {
-    margin-top: 8px;
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    font-family: var(--font-mono);
-    font-size: var(--font-tiny);
-    color: var(--muted);
-    user-select: text;
-  }
-
-  .setting {
-    max-width: 720px;
-    padding: 20px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-card);
-    background: var(--surface-veil);
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-  }
-
-  .sub {
-    margin: 4px 0 0;
-    font-size: var(--font-small);
-    color: var(--muted);
-  }
-
-
-
   .note {
     margin: 16px 0 0;
     padding-top: 14px;
@@ -469,5 +675,42 @@
     margin: 0;
     font-size: var(--font-tiny);
     color: var(--muted);
+  }
+
+  /* The sentence beside a button that says what pressing it costs. Sits on the
+     same line, so it is read before the click rather than after. */
+  .hint {
+    flex: 1;
+    font-size: var(--font-tiny);
+    color: var(--faint);
+    line-height: 1.6;
+  }
+
+  .hint.running {
+    color: var(--accent);
+  }
+
+  .hint.warn {
+    color: var(--error);
+  }
+
+  /* A hostname is read left to right and can be long — no letter-spacing, and
+     it may shrink rather than push the copy button off the row. */
+  .addr {
+    flex: 0 1 auto;
+    min-width: 0;
+    letter-spacing: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .note.no-tunnel {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  .note a {
+    color: var(--accent);
   }
 </style>

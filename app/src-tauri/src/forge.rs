@@ -26,6 +26,17 @@ const INSTALLER_URL: &str =
 /// A version string longer than this is not a version string.
 const MAX_VERSION_LEN: usize = 64;
 
+/// Where a loader unpacks the arguments and jars it generates, relative to the
+/// server folder. Forge and NeoForge use the same layout under different
+/// coordinates, so everything downstream only has to know the list.
+///
+/// Ordered: a folder holds one loader, and checking Forge first keeps the
+/// answer stable for the installs that already exist.
+pub const LOADER_LIBS: [&str; 2] = [
+    "libraries/net/minecraftforge/forge",
+    "libraries/net/neoforged/neoforge",
+];
+
 pub struct Forge {
     client: reqwest::Client,
     /// Fetched once per run. Forge does not publish hourly, and re-fetching a
@@ -226,7 +237,36 @@ pub fn installer_filename(version: &str) -> CoreResult<String> {
 pub fn split_version(version: &str) -> (String, String) {
     match version.split_once('-') {
         Some((mc, build)) => (mc.to_owned(), build.to_owned()),
-        None => (version.to_owned(), String::new()),
+        // NeoForge carries no Minecraft version in its own, so the line has to
+        // be derived or the card says nothing about which Minecraft this is.
+        None => match neoforge_mc_line(version) {
+            Some(mc) => (mc, version.to_owned()),
+            None => (version.to_owned(), String::new()),
+        },
+    }
+}
+
+/// The Minecraft line a NeoForge version targets.
+///
+/// NeoForge numbers its builds after the Minecraft version rather than
+/// alongside it: `21.1.249` is a build for 1.21.1. A `0` minor is the `.0`
+/// release, which Minecraft writes without it -- `21.0.167` is 1.21, not
+/// 1.21.0.
+///
+/// Minecraft's move to year-based versions changed the shape again:
+/// `26.2.0.75` carries four parts and targets 26.2, which needs no `1.` in
+/// front. Anything that is not all-numeric is not a NeoForge version.
+fn neoforge_mc_line(version: &str) -> Option<String> {
+    let parts: Vec<&str> = version.split('.').collect();
+    let nums: Vec<u32> = parts.iter().filter_map(|p| p.parse().ok()).collect();
+    if nums.len() != parts.len() {
+        return None;
+    }
+    match nums.as_slice() {
+        [major, minor, _, _] => Some(format!("{major}.{minor}")),
+        [major, 0, _] => Some(format!("1.{major}")),
+        [major, minor, _] => Some(format!("1.{major}.{minor}")),
+        _ => None,
     }
 }
 
@@ -240,7 +280,11 @@ pub fn split_version(version: &str) -> (String, String) {
 /// server still installs, it just shows no version until it is started.
 pub fn version_from_filename(name: &str) -> Option<String> {
     let stem = name.strip_suffix("-installer.jar")?;
-    let version = stem.strip_prefix("forge-")?;
+    // `neoforge-` cannot be reached by stripping `forge-`: the prefix has to
+    // match from the start, and NeoForge's begins with `neo`.
+    let version = stem
+        .strip_prefix("forge-")
+        .or_else(|| stem.strip_prefix("neoforge-"))?;
     is_valid_version(version).then(|| version.to_owned())
 }
 
@@ -255,13 +299,22 @@ pub fn version_from_filename(name: &str) -> Option<String> {
 /// their `run.bat` does not exist either, so they launch from `server.jar` and
 /// run on Java 8 regardless.
 pub fn version_from_install(dir: &Path) -> Option<String> {
-    let forge = dir.join("libraries/net/minecraftforge/forge");
-    std::fs::read_dir(forge)
+    // One folder, one loader: take the first root that has anything rather
+    // than comparing a Forge version against a NeoForge one, which are not on
+    // the same scale and would sort nonsensically against each other.
+    LOADER_LIBS
+        .iter()
+        .find_map(|lib| newest_build(&dir.join(lib)))
+}
+
+/// The newest build directory under one loader's library root.
+fn newest_build(root: &Path) -> Option<String> {
+    std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
-        .filter(|name| is_valid_version(name) && name.contains('-'))
+        .filter(|name| is_valid_version(name))
         // A folder that has been upgraded in place keeps both versions; the
         // newest is the one its run script points at.
         .max_by_key(|name| version_key(name))
@@ -487,6 +540,42 @@ mod tests {
         assert_eq!(
             version_from_install(dir.path()),
             Some("1.20.1-47.3.11".into())
+        );
+    }
+
+    #[test]
+    fn a_neoforge_install_reveals_its_version_and_minecraft_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let libs = dir.path().join("libraries/net/neoforged/neoforge");
+        std::fs::create_dir_all(libs.join("21.1.249")).unwrap();
+        assert_eq!(version_from_install(dir.path()), Some("21.1.249".into()));
+        assert_eq!(
+            split_version("21.1.249"),
+            ("1.21.1".into(), "21.1.249".into())
+        );
+    }
+
+    #[test]
+    fn a_neoforge_version_names_the_minecraft_it_targets() {
+        for (version, mc) in [
+            ("21.1.249", "1.21.1"),
+            ("20.4.237", "1.20.4"),
+            // A `0` minor is the `.0` release, which Minecraft writes without it.
+            ("21.0.167", "1.21"),
+            // Year-based Minecraft: four parts, and no `1.` in front.
+            ("26.2.0.75", "26.2"),
+        ] {
+            assert_eq!(neoforge_mc_line(version).as_deref(), Some(mc), "{version}");
+        }
+        // Forge versions carry a dash and are not NeoForge's shape.
+        assert_eq!(neoforge_mc_line("1.20.1-47.2.0"), None);
+    }
+
+    #[test]
+    fn a_neoforge_installer_filename_yields_its_version() {
+        assert_eq!(
+            version_from_filename("neoforge-21.1.249-installer.jar").as_deref(),
+            Some("21.1.249")
         );
     }
 
